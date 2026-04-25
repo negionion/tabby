@@ -9,6 +9,7 @@
   "typings": "typings/index.d.ts",
   "scripts": {
     "build": "webpack --progress --color",
+    "package": "sh build.sh",
     "watch": "webpack --progress --color --watch"
   },
   "files": [
