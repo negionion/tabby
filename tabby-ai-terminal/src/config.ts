@@ -3,6 +3,10 @@ import { ConfigProvider, Platform } from 'tabby-core'
 /** @hidden */
 export class AITerminalConfigProvider extends ConfigProvider {
     defaults = {
+        aiTerminal: {
+            provider: 'codex',
+            model: 'auto',
+        },
         hotkeys: {
             'toggle-ai-terminal-panel': [],
         },

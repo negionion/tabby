@@ -1,11 +1,24 @@
 import { BaseTerminalTabComponent } from 'tabby-terminal'
+import { Subscription } from 'rxjs'
 import { AITerminalAnalyzer, SuggestedCommand } from './analysis'
+import { AIProviderAuthService } from './services/aiProviderAuth.service'
+import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 
 const RECENT_OUTPUT_LIMIT = 12000
 const VISIBLE_OUTPUT_LINES = 14
 
 export class AITerminalPanel {
     readonly element: HTMLElement
+    private providerAuth: AIProviderAuthService
+    private header: HTMLElement
+    private signedInIdentity: HTMLElement
+    private providerSelect: HTMLSelectElement
+    private modelSelect: HTMLSelectElement
+    private statusLine: HTMLElement
+    private loginOnly: HTMLElement
+    private content: HTMLElement
+    private headerLogoutButton: HTMLButtonElement
+    private loginOnlyLoginButton: HTMLButtonElement
     private question: HTMLTextAreaElement
     private output: HTMLElement
     private analysis: HTMLElement
@@ -13,14 +26,59 @@ export class AITerminalPanel {
     private draft: HTMLTextAreaElement
     private recentOutput = ''
     private visible = false
+    private pendingLoginRefreshes = 0
+    private lastProviderStatus: AIProviderStatus|null = null
+    private lastFocusRefreshAt = 0
+    private statusSubscription: Subscription
 
     constructor (
         private tab: BaseTerminalTabComponent<any>,
         private analyzer: AITerminalAnalyzer,
+        providerAuth: AIProviderAuthService,
     ) {
+        this.providerAuth = providerAuth
+        this.statusSubscription = this.providerAuth.statusChanged$.subscribe(status => {
+            this.applyProviderStatus(status)
+        })
         this.element = document.createElement('aside')
         this.element.className = 'ai-terminal-panel'
         this.element.addEventListener('click', event => event.stopPropagation())
+
+        this.header = document.createElement('div')
+        this.header.className = 'ai-provider-header'
+
+        this.signedInIdentity = document.createElement('div')
+        this.signedInIdentity.className = 'ai-provider-identity'
+
+        this.providerSelect = document.createElement('select')
+        this.providerSelect.className = 'form-control form-control-sm ai-provider-select'
+        for (const provider of AI_PROVIDERS) {
+            const option = document.createElement('option')
+            option.value = provider.id
+            option.textContent = provider.label
+            this.providerSelect.appendChild(option)
+        }
+        this.providerSelect.value = this.providerAuth.getSelectedProvider()
+        this.providerSelect.addEventListener('change', () => {
+            this.setProvider(this.providerSelect.value as AIProviderID)
+        })
+
+        this.modelSelect = document.createElement('select')
+        this.modelSelect.className = 'form-control form-control-sm ai-model-select'
+        this.modelSelect.addEventListener('change', () => {
+            this.providerAuth.setSelectedModel(this.modelSelect.value)
+        })
+        this.refreshModelOptions()
+
+        this.statusLine = document.createElement('div')
+        this.statusLine.className = 'ai-provider-status'
+
+        this.loginOnly = document.createElement('div')
+        this.loginOnly.className = 'ai-login-only'
+        this.content = document.createElement('div')
+
+        this.headerLogoutButton = this.button('Logout', 'secondary', () => this.logout())
+        this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
         this.output = document.createElement('pre')
@@ -28,7 +86,21 @@ export class AITerminalPanel {
         this.suggestions = document.createElement('div')
         this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
 
-        this.element.append(
+        this.header.append(
+            this.signedInIdentity,
+            this.providerSelect,
+            this.modelSelect,
+            this.headerLogoutButton,
+        )
+
+        this.loginOnly.append(
+            this.section('AI Provider', this.statusLine, [
+                this.loginOnlyLoginButton,
+                this.button('Refresh', 'secondary', () => this.refreshProviderStatus()),
+            ]),
+        )
+
+        this.content.append(
             this.section('AI Chat Panel', this.question, [
                 this.button('Analyze', 'primary', () => this.analyze()),
             ]),
@@ -44,10 +116,18 @@ export class AITerminalPanel {
             ]),
         )
 
+        this.element.append(this.header, this.loginOnly, this.content)
+        this.applyProviderStatus({
+            provider: this.providerAuth.getSelectedProvider(),
+            state: 'checking',
+            label: 'Checking provider status...',
+        })
         this.render()
     }
 
     destroy (): void {
+        this.statusSubscription.unsubscribe()
+        window.removeEventListener('focus', this.refreshAfterFocus)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
         this.element.remove()
     }
@@ -62,8 +142,15 @@ export class AITerminalPanel {
         this.render()
 
         if (this.visible) {
+            if (this.shouldRefreshAfterFocus()) {
+                this.refreshAfterFocus()
+            } else if (this.lastProviderStatus?.state === 'checking') {
+                this.refreshProviderStatus()
+            }
             setTimeout(() => this.question.focus())
+            window.addEventListener('focus', this.refreshAfterFocus)
         } else {
+            window.removeEventListener('focus', this.refreshAfterFocus)
             this.tab.frontend?.focus()
         }
     }
@@ -84,6 +171,107 @@ export class AITerminalPanel {
         if (!this.analysis.textContent) {
             this.analysis.textContent = 'Ask a question and click Analyze. Suggestions will be generated from recent terminal output.'
         }
+    }
+
+    private refreshAfterFocus = (): void => {
+        if (!this.visible) {
+            return
+        }
+        const now = Date.now()
+        if (now - this.lastFocusRefreshAt < 500) {
+            return
+        }
+        if (this.shouldRefreshAfterFocus()) {
+            this.lastFocusRefreshAt = now
+            this.pendingLoginRefreshes = Math.max(0, this.pendingLoginRefreshes - 1)
+            this.refreshProviderStatus()
+        }
+    }
+
+    private async refreshProviderStatus (): Promise<AIProviderStatus> {
+        this.applyProviderStatus({
+            provider: this.providerAuth.getSelectedProvider(),
+            state: 'checking',
+            label: 'Checking provider status...',
+        })
+        const status = await this.providerAuth.checkSelectedProviderStatus()
+        this.applyProviderStatus(status)
+        return status
+    }
+
+    private async setProvider (provider: AIProviderID): Promise<void> {
+        this.applyProviderStatus({
+            provider,
+            state: 'checking',
+            label: 'Checking provider status...',
+        })
+        this.refreshModelOptions()
+        this.applyProviderStatus(await this.providerAuth.setSelectedProvider(provider))
+    }
+
+    private async login (): Promise<void> {
+        const status = await this.refreshProviderStatus()
+        if (status.state === 'logged-in') {
+            return
+        }
+        this.pendingLoginRefreshes = 3
+        await this.providerAuth.startLogin(this.providerSelect.value as AIProviderID)
+    }
+
+    private async logout (): Promise<void> {
+        const status = await this.refreshProviderStatus()
+        if (status.state !== 'logged-in') {
+            return
+        }
+        this.pendingLoginRefreshes = 0
+        const logoutStarted = await this.providerAuth.confirmAndStartLogout(this.providerSelect.value as AIProviderID)
+        if (!logoutStarted) {
+            return
+        }
+        const statusAfterLogout: AIProviderStatus = {
+            provider: this.providerSelect.value as AIProviderID,
+            state: 'logged-out',
+            label: 'Logout started in an external terminal',
+            detail: 'Refresh after the provider CLI finishes.',
+        }
+        this.applyProviderStatus(statusAfterLogout)
+        this.providerAuth.publishStatus(statusAfterLogout)
+    }
+
+    private applyProviderStatus (status: AIProviderStatus): void {
+        this.lastProviderStatus = status
+        this.providerSelect.value = status.provider
+        this.refreshModelOptions()
+        const provider = AI_PROVIDERS.find(item => item.id === status.provider)
+        this.signedInIdentity.textContent = status.account ? `${provider?.label ?? status.provider} - ${status.account}` : `${provider?.label ?? status.provider}`
+        this.statusLine.textContent = status.detail ? `${status.label}\n${status.detail}` : status.label
+        const signedIn = status.state === 'logged-in'
+        this.loginOnly.hidden = signedIn
+        this.content.hidden = !signedIn
+        this.signedInIdentity.hidden = !signedIn
+        this.providerSelect.hidden = signedIn
+        this.modelSelect.hidden = !signedIn
+        this.headerLogoutButton.hidden = !signedIn
+        this.loginOnlyLoginButton.hidden = status.state === 'checking'
+        if (signedIn) {
+            this.pendingLoginRefreshes = 0
+        }
+    }
+
+    private shouldRefreshAfterFocus (): boolean {
+        return this.pendingLoginRefreshes > 0
+    }
+
+    private refreshModelOptions (): void {
+        const provider = AI_PROVIDERS.find(item => item.id === this.providerSelect.value) ?? AI_PROVIDERS[0]
+        this.modelSelect.replaceChildren()
+        for (const model of provider.models) {
+            const option = document.createElement('option')
+            option.value = model
+            option.textContent = model === 'auto' ? 'Auto model' : model
+            this.modelSelect.appendChild(option)
+        }
+        this.modelSelect.value = this.providerAuth.getSelectedModel()
     }
 
     private renderSuggestions (suggestedCommands: SuggestedCommand[]): void {
@@ -185,4 +373,5 @@ export class AITerminalPanel {
             .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
             .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
     }
+
 }

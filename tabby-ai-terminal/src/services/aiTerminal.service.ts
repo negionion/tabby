@@ -4,6 +4,7 @@ import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { AITerminalAnalyzer } from '../analysis'
 import { AITerminalPanel } from '../panel'
 import { AI_TERMINAL_PANEL_STYLES } from '../panelStyles'
+import { AIProviderAuthService } from './aiProviderAuth.service'
 
 @Injectable({ providedIn: 'root' })
 export class AITerminalService {
@@ -14,6 +15,7 @@ export class AITerminalService {
     constructor (
         private app: AppService,
         private notifications: NotificationsService,
+        readonly providerAuth: AIProviderAuthService,
     ) { }
 
     attachToTerminal (tab: BaseTerminalTabComponent<any>): void {
@@ -22,7 +24,7 @@ export class AITerminalService {
         }
 
         this.installStyles()
-        const panel = new AITerminalPanel(tab, this.analyzer)
+        const panel = new AITerminalPanel(tab, this.analyzer, this.providerAuth)
         this.panels.set(tab, panel)
         tab.element.nativeElement.appendChild(panel.element)
     }

@@ -16,6 +16,29 @@ export const AI_TERMINAL_PANEL_STYLES = `
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
 }
 .ai-terminal-panel.visible { display: block; }
+.ai-provider-header { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.ai-provider-select { flex: 1 1 120px; min-width: 0; }
+.ai-model-select { flex: 1 1 130px; min-width: 0; }
+.ai-provider-identity {
+    flex: 1 1 170px;
+    min-width: 0;
+    color: #eef6ff;
+    font-size: 12px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ai-provider-status {
+    margin: 0;
+    padding: 10px;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: rgba(255, 255, 255, 0.05);
+    color: #d7e7f5;
+    font-size: 12px;
+}
 .ai-panel-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .ai-panel-title { font-size: 12px; font-weight: 700; color: #8fd3ff; }
 .ai-terminal-panel textarea {
