@@ -8,6 +8,7 @@ import { AIProviderID, AIProviderStatus, getAIProvider } from '../providers'
 export class AIProviderAuthService {
     private statusChecks = new Map<AIProviderID, Promise<AIProviderStatus>>()
     private statusChanged = new Subject<AIProviderStatus>()
+    private modelChecks = new Map<AIProviderID, Promise<string[]>>()
 
     get statusChanged$ (): Observable<AIProviderStatus> { return this.statusChanged }
 
@@ -29,13 +30,31 @@ export class AIProviderAuthService {
     getSelectedModel (): string {
         const provider = getAIProvider(this.config.store.aiTerminal.provider)
         const model = this.config.store.aiTerminal.model
-        return provider.models.includes(model) ? model : provider.defaultModel
+        return model || provider.defaultModel
     }
 
     async setSelectedModel (model: string): Promise<void> {
         const provider = getAIProvider(this.config.store.aiTerminal.provider)
-        this.config.store.aiTerminal.model = provider.models.includes(model) ? model : provider.defaultModel
+        this.config.store.aiTerminal.model = model.trim() || provider.defaultModel
         await this.config.save()
+    }
+
+    getAvailableModels (providerID: AIProviderID = this.getSelectedProvider(), force = false): Promise<string[]> {
+        if (force) {
+            this.modelChecks.delete(providerID)
+        }
+
+        const activeCheck = this.modelChecks.get(providerID)
+        if (activeCheck) {
+            return activeCheck
+        }
+
+        const check = this.fetchAvailableModels(providerID)
+            .finally(() => {
+                this.modelChecks.delete(providerID)
+            })
+        this.modelChecks.set(providerID, check)
+        return check
     }
 
     checkSelectedProviderStatus (): Promise<AIProviderStatus> {
@@ -136,6 +155,42 @@ export class AIProviderAuthService {
                 })
             }
         })
+    }
+
+    private async fetchAvailableModels (providerID: AIProviderID): Promise<string[]> {
+        const provider = getAIProvider(providerID)
+        if (provider.id !== 'codex') {
+            return provider.models
+        }
+
+        try {
+            const output = await this.execProviderCommand(provider.command, ['debug', 'models'])
+            const catalog = this.extractCodexModelCatalog(output)
+            return this.mergeModelOptions(provider.models, catalog)
+        } catch {
+            return provider.models
+        }
+    }
+
+    private extractCodexModelCatalog (output: string): string[] {
+        const jsonLine = output.split(/\r?\n/).find(line => line.trim().startsWith('{'))
+        if (!jsonLine) {
+            return []
+        }
+
+        const data = JSON.parse(jsonLine)
+        if (!Array.isArray(data.models)) {
+            return []
+        }
+
+        return data.models
+            .filter((model: any) => model && typeof model.slug === 'string')
+            .filter((model: any) => model.visibility !== 'hidden')
+            .map((model: any) => model.slug)
+    }
+
+    private mergeModelOptions (fallbackModels: string[], discoveredModels: string[]): string[] {
+        return [...new Set([...fallbackModels, ...discoveredModels])]
     }
 
     private resolveCommandResult (

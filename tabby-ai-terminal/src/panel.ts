@@ -24,6 +24,7 @@ export class AITerminalPanel {
     private loginOnlyLoginButton: HTMLButtonElement
     private analyzeButton: HTMLButtonElement
     private cancelButton: HTMLButtonElement
+    private refreshModelsButton: HTMLButtonElement
     private question: HTMLTextAreaElement
     private output: HTMLElement
     private analysis: HTMLElement
@@ -93,6 +94,7 @@ export class AITerminalPanel {
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
         this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
         this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
+        this.refreshModelsButton = this.button('Refresh models', 'secondary', () => this.refreshModelOptions(true))
         this.cancelButton.hidden = true
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
@@ -105,6 +107,7 @@ export class AITerminalPanel {
             this.signedInIdentity,
             this.providerSelect,
             this.modelSelect,
+            this.refreshModelsButton,
             this.headerLogoutButton,
         )
 
@@ -280,6 +283,7 @@ export class AITerminalPanel {
         this.cancelButton.hidden = !running
         this.question.disabled = running
         this.modelSelect.disabled = running
+        this.refreshModelsButton.disabled = running
         this.headerLogoutButton.disabled = running
     }
 
@@ -374,6 +378,7 @@ export class AITerminalPanel {
         this.signedInIdentity.hidden = !signedIn
         this.providerSelect.hidden = signedIn
         this.modelSelect.hidden = !signedIn
+        this.refreshModelsButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
         if (signedIn) {
@@ -385,16 +390,36 @@ export class AITerminalPanel {
         return this.pendingLoginRefreshes > 0
     }
 
-    private refreshModelOptions (): void {
+    private async refreshModelOptions (force = false): Promise<void> {
         const provider = AI_PROVIDERS.find(item => item.id === this.providerSelect.value) ?? AI_PROVIDERS[0]
+        const selectedModel = this.providerAuth.getSelectedModel()
         this.modelSelect.replaceChildren()
-        for (const model of provider.models) {
-            const option = document.createElement('option')
-            option.value = model
-            option.textContent = model === 'auto' ? 'Auto model' : model
-            this.modelSelect.appendChild(option)
+        this.modelSelect.appendChild(this.modelOption(selectedModel, selectedModel === 'auto' ? 'Auto model' : selectedModel))
+        this.modelSelect.value = selectedModel
+
+        const previousRefreshDisabled = this.refreshModelsButton?.disabled ?? false
+        if (this.refreshModelsButton) {
+            this.refreshModelsButton.disabled = true
         }
-        this.modelSelect.value = this.providerAuth.getSelectedModel()
+
+        const models = await this.providerAuth.getAvailableModels(provider.id, force)
+        const modelOptions = models.includes(selectedModel) ? models : [selectedModel, ...models]
+        this.modelSelect.replaceChildren()
+        for (const model of modelOptions) {
+            this.modelSelect.appendChild(this.modelOption(model, model === 'auto' ? 'Auto model' : model))
+        }
+        this.modelSelect.value = selectedModel
+
+        if (this.refreshModelsButton) {
+            this.refreshModelsButton.disabled = previousRefreshDisabled || Boolean(this.runHandle)
+        }
+    }
+
+    private modelOption (value: string, label: string): HTMLOptionElement {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = label
+        return option
     }
 
     private renderSuggestions (suggestedCommands: SuggestedCommand[]): void {

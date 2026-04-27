@@ -1,7 +1,9 @@
 import { Injectable } from '@angular/core'
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process'
+import { ConfigService } from 'tabby-core'
 import { AIProviderAuthService } from './aiProviderAuth.service'
 import { AIProviderID, getAIProvider } from '../providers'
+import { DEFAULT_AI_TERMINAL_SYSTEM_PROMPT } from '../config'
 
 export interface AIProviderRunRequest {
     provider: AIProviderID
@@ -23,6 +25,7 @@ export interface AIProviderRunHandlers {
 export class AIProviderRunnerService {
     constructor (
         private providerAuth: AIProviderAuthService,
+        private config: ConfigService,
     ) { }
 
     run (request: AIProviderRunRequest, handlers: AIProviderRunHandlers): AIProviderRunHandle {
@@ -79,11 +82,11 @@ export class AIProviderRunnerService {
     }
 
     private buildPrompt (request: AIProviderRunRequest): string {
+        const systemPrompt = this.config.store.aiTerminal.systemPrompt?.trim() || DEFAULT_AI_TERMINAL_SYSTEM_PROMPT
         return [
-            'You are helping inside an AI terminal panel.',
-            'Analyze the user request using the terminal output below.',
-            'Do not execute commands. Suggest safe commands when helpful.',
-            'Keep the answer concise and practical.',
+            '<system_instructions>',
+            systemPrompt,
+            '</system_instructions>',
             '',
             '<user_request>',
             request.question.trim() || 'Analyze the recent terminal output.',

@@ -2,6 +2,16 @@ h3.mb-3(translate) AI terminal
 
 .form-line
     .header
+        .title(translate) System prompt
+        .description(translate) Instructions sent to the AI before the user request and captured terminal output.
+    textarea.form-control(
+        rows='8',
+        [(ngModel)]='config.store.aiTerminal.systemPrompt',
+        (ngModelChange)='config.save()',
+    )
+
+.form-line
+    .header
         .title(translate) Session output limit
         .description(translate) Keep only the latest N lines of terminal output for each analysis run.
     input.form-control(
