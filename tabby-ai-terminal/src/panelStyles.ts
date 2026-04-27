@@ -14,6 +14,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     background: rgba(14, 19, 25, 0.96);
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+    user-select: text;
 }
 .ai-terminal-panel.visible { display: block; }
 .ai-provider-header { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }

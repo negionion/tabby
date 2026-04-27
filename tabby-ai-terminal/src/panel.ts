@@ -1,7 +1,8 @@
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { Subscription } from 'rxjs'
-import { AITerminalAnalyzer, SuggestedCommand } from './analysis'
+import { SuggestedCommand } from './analysis'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
+import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 
 const RECENT_OUTPUT_LIMIT = 12000
@@ -10,6 +11,7 @@ const VISIBLE_OUTPUT_LINES = 14
 export class AITerminalPanel {
     readonly element: HTMLElement
     private providerAuth: AIProviderAuthService
+    private providerRunner: AIProviderRunnerService
     private header: HTMLElement
     private signedInIdentity: HTMLElement
     private providerSelect: HTMLSelectElement
@@ -19,6 +21,8 @@ export class AITerminalPanel {
     private content: HTMLElement
     private headerLogoutButton: HTMLButtonElement
     private loginOnlyLoginButton: HTMLButtonElement
+    private analyzeButton: HTMLButtonElement
+    private cancelButton: HTMLButtonElement
     private question: HTMLTextAreaElement
     private output: HTMLElement
     private analysis: HTMLElement
@@ -30,19 +34,22 @@ export class AITerminalPanel {
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
     private statusSubscription: Subscription
+    private runHandle: AIProviderRunHandle|null = null
 
     constructor (
         private tab: BaseTerminalTabComponent<any>,
-        private analyzer: AITerminalAnalyzer,
         providerAuth: AIProviderAuthService,
+        providerRunner: AIProviderRunnerService,
     ) {
         this.providerAuth = providerAuth
+        this.providerRunner = providerRunner
         this.statusSubscription = this.providerAuth.statusChanged$.subscribe(status => {
             this.applyProviderStatus(status)
         })
         this.element = document.createElement('aside')
         this.element.className = 'ai-terminal-panel'
         this.element.addEventListener('click', event => event.stopPropagation())
+        this.element.addEventListener('mousedown', event => event.stopPropagation())
 
         this.header = document.createElement('div')
         this.header.className = 'ai-provider-header'
@@ -79,6 +86,9 @@ export class AITerminalPanel {
 
         this.headerLogoutButton = this.button('Logout', 'secondary', () => this.logout())
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
+        this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
+        this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
+        this.cancelButton.hidden = true
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
         this.output = document.createElement('pre')
@@ -101,9 +111,7 @@ export class AITerminalPanel {
         )
 
         this.content.append(
-            this.section('AI Chat Panel', this.question, [
-                this.button('Analyze', 'primary', () => this.analyze()),
-            ]),
+            this.section('AI Chat Panel', this.question, [this.analyzeButton, this.cancelButton]),
             this.section('Latest Session Output', this.output),
             this.section('Analysis', this.analysis),
             this.section('Suggested Commands', this.suggestions),
@@ -126,6 +134,7 @@ export class AITerminalPanel {
     }
 
     destroy (): void {
+        this.cancelAnalyze()
         this.statusSubscription.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
@@ -155,10 +164,79 @@ export class AITerminalPanel {
         }
     }
 
-    private analyze (): void {
-        const result = this.analyzer.analyze(this.question.value, this.recentOutput)
-        this.analysis.textContent = result.message
-        this.renderSuggestions(result.suggestions)
+    private async analyze (): Promise<void> {
+        if (this.runHandle) {
+            return
+        }
+        this.analysis.textContent = ''
+        this.draft.value = ''
+        this.renderSuggestions([])
+        this.setRunning(true)
+
+        try {
+            this.runHandle = this.providerRunner.run(
+                {
+                    provider: this.providerAuth.getSelectedProvider(),
+                    question: this.question.value,
+                    terminalOutput: this.recentOutput,
+                },
+                {
+                    output: chunk => this.appendAnalysis(chunk),
+                    error: chunk => this.appendAnalysis(chunk),
+                    done: code => {
+                        if (code && code !== 0) {
+                            this.appendAnalysis(`\nCodex exited with code ${code}.\n`)
+                        }
+                        this.runHandle = null
+                        this.setRunning(false)
+                    },
+                },
+            )
+        } catch (error) {
+            this.appendAnalysis(error instanceof Error ? error.message : `${error}`)
+            this.runHandle = null
+            this.setRunning(false)
+        }
+    }
+
+    private cancelAnalyze (): void {
+        this.runHandle?.cancel()
+        this.runHandle = null
+        this.setRunning(false)
+    }
+
+    private appendAnalysis (chunk: string): void {
+        if (!chunk) {
+            return
+        }
+        this.analysis.textContent = `${this.analysis.textContent}${chunk}`
+        this.analysis.scrollTop = this.analysis.scrollHeight
+        this.syncDraftFromAnalysisCodeBlock()
+    }
+
+    private syncDraftFromAnalysisCodeBlock (): void {
+        const commandBlock = this.extractLastCodeBlock(this.analysis.textContent ?? '')
+        if (commandBlock === null) {
+            return
+        }
+        this.draft.value = commandBlock
+    }
+
+    private extractLastCodeBlock (text: string): string|null {
+        const blocks = [...text.matchAll(/```[^\r\n`]*(?:\r?\n)?([\s\S]*?)```/g)]
+        if (!blocks.length) {
+            return null
+        }
+        const lastBlock = blocks[blocks.length - 1][1].trim()
+        return lastBlock || null
+    }
+
+    private setRunning (running: boolean): void {
+        this.analyzeButton.disabled = running
+        this.cancelButton.hidden = !running
+        this.question.disabled = running
+        this.modelSelect.disabled = running
+        this.headerLogoutButton.disabled = running
     }
 
     private render (): void {

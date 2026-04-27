@@ -1,14 +1,13 @@
 import { Injectable } from '@angular/core'
 import { AppService, NotificationsService, SplitTabComponent } from 'tabby-core'
 import { BaseTerminalTabComponent } from 'tabby-terminal'
-import { AITerminalAnalyzer } from '../analysis'
 import { AITerminalPanel } from '../panel'
 import { AI_TERMINAL_PANEL_STYLES } from '../panelStyles'
 import { AIProviderAuthService } from './aiProviderAuth.service'
+import { AIProviderRunnerService } from './aiProviderRunner.service'
 
 @Injectable({ providedIn: 'root' })
 export class AITerminalService {
-    private analyzer = new AITerminalAnalyzer()
     private panels = new Map<BaseTerminalTabComponent<any>, AITerminalPanel>()
     private stylesInstalled = false
 
@@ -16,6 +15,7 @@ export class AITerminalService {
         private app: AppService,
         private notifications: NotificationsService,
         readonly providerAuth: AIProviderAuthService,
+        readonly providerRunner: AIProviderRunnerService,
     ) { }
 
     attachToTerminal (tab: BaseTerminalTabComponent<any>): void {
@@ -24,7 +24,7 @@ export class AITerminalService {
         }
 
         this.installStyles()
-        const panel = new AITerminalPanel(tab, this.analyzer, this.providerAuth)
+        const panel = new AITerminalPanel(tab, this.providerAuth, this.providerRunner)
         this.panels.set(tab, panel)
         tab.element.nativeElement.appendChild(panel.element)
     }
