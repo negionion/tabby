@@ -6,6 +6,8 @@ export class AITerminalConfigProvider extends ConfigProvider {
         aiTerminal: {
             provider: 'codex',
             model: 'auto',
+            maxSessionOutputLines: 100,
+            ignoreEmptyEnterPrompts: true,
         },
         hotkeys: {
             'toggle-ai-terminal-panel': [],

@@ -1,0 +1,25 @@
+h3.mb-3(translate) AI terminal
+
+.form-line
+    .header
+        .title(translate) Session output limit
+        .description(translate) Keep only the latest N lines of terminal output for each analysis run.
+    input.form-control(
+        type='number',
+        min='1',
+        step='1',
+        [(ngModel)]='config.store.aiTerminal.maxSessionOutputLines',
+        (ngModelChange)='fixSessionOutputLimit(); config.save()',
+    )
+
+.form-line
+    .header
+        .title(translate) Ignore terminal empty input
+        .description(translate) Skip terminal output caused by pressing Enter on an empty line, while still keeping prompts after real commands.
+    toggle(
+        [(ngModel)]='config.store.aiTerminal.ignoreEmptyEnterPrompts',
+        (ngModelChange)='config.save()',
+    )
+
+.alert.alert-info
+    span(translate) This limit applies to the terminal output stored for the AI panel and used when you click Analyze.

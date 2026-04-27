@@ -1,12 +1,13 @@
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { Subscription } from 'rxjs'
+import { ConfigService } from 'tabby-core'
 import { SuggestedCommand } from './analysis'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
 import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 
-const RECENT_OUTPUT_LIMIT = 12000
 const VISIBLE_OUTPUT_LINES = 14
+const ANALYSIS_PLACEHOLDER = 'Ask a question and click Analyze. Suggestions will be generated from recent terminal output.'
 
 export class AITerminalPanel {
     readonly element: HTMLElement
@@ -28,7 +29,10 @@ export class AITerminalPanel {
     private analysis: HTMLElement
     private suggestions: HTMLElement
     private draft: HTMLTextAreaElement
-    private recentOutput = ''
+    private recentOutputLines: string[] = []
+    private pendingOutput = ''
+    private currentInputLine = ''
+    private skipNextEmptyInputOutputLine = false
     private visible = false
     private pendingLoginRefreshes = 0
     private lastProviderStatus: AIProviderStatus|null = null
@@ -40,6 +44,7 @@ export class AITerminalPanel {
         private tab: BaseTerminalTabComponent<any>,
         providerAuth: AIProviderAuthService,
         providerRunner: AIProviderRunnerService,
+        private config: ConfigService,
     ) {
         this.providerAuth = providerAuth
         this.providerRunner = providerRunner
@@ -142,8 +147,33 @@ export class AITerminalPanel {
     }
 
     appendOutput (data: string): void {
-        this.recentOutput = `${this.recentOutput}${this.stripAnsi(data)}`.slice(-RECENT_OUTPUT_LIMIT)
+        const normalized = this.stripAnsi(data).replace(/\r\n?/g, '\n')
+        if (!normalized) {
+            return
+        }
+
+        this.pendingOutput += normalized
+        let newlineIndex = this.pendingOutput.indexOf('\n')
+        while (newlineIndex !== -1) {
+            const line = this.pendingOutput.slice(0, newlineIndex)
+            this.appendOutputLine(line)
+            this.pendingOutput = this.pendingOutput.slice(newlineIndex + 1)
+            newlineIndex = this.pendingOutput.indexOf('\n')
+        }
         this.render()
+    }
+
+    handleInput (data: string|Buffer): void {
+        if (!this.shouldIgnoreEmptyEnterPrompts()) {
+            return
+        }
+
+        const text = Buffer.isBuffer(data) ? data.toString('utf-8') : data
+        if (!text) {
+            return
+        }
+
+        this.trackTerminalInput(text)
     }
 
     toggle (): void {
@@ -168,6 +198,11 @@ export class AITerminalPanel {
         if (this.runHandle) {
             return
         }
+        this.flushPendingOutput()
+        this.skipNextEmptyInputOutputLine = false
+        this.trimRecentOutput()
+        const question = this.question.value
+        const terminalOutput = this.getRecentOutputText()
         this.analysis.textContent = ''
         this.draft.value = ''
         this.renderSuggestions([])
@@ -177,8 +212,8 @@ export class AITerminalPanel {
             this.runHandle = this.providerRunner.run(
                 {
                     provider: this.providerAuth.getSelectedProvider(),
-                    question: this.question.value,
-                    terminalOutput: this.recentOutput,
+                    question,
+                    terminalOutput,
                 },
                 {
                     output: chunk => this.appendAnalysis(chunk),
@@ -192,6 +227,12 @@ export class AITerminalPanel {
                     },
                 },
             )
+            this.question.value = ''
+            this.recentOutputLines = []
+            this.pendingOutput = ''
+            this.currentInputLine = ''
+            this.skipNextEmptyInputOutputLine = false
+            this.render()
         } catch (error) {
             this.appendAnalysis(error instanceof Error ? error.message : `${error}`)
             this.runHandle = null
@@ -208,6 +249,9 @@ export class AITerminalPanel {
     private appendAnalysis (chunk: string): void {
         if (!chunk) {
             return
+        }
+        if (this.analysis.textContent === ANALYSIS_PLACEHOLDER) {
+            this.analysis.textContent = ''
         }
         this.analysis.textContent = `${this.analysis.textContent}${chunk}`
         this.analysis.scrollTop = this.analysis.scrollHeight
@@ -240,14 +284,15 @@ export class AITerminalPanel {
     }
 
     private render (): void {
+        this.trimRecentOutput()
         this.element.classList.toggle('visible', this.visible)
         this.tab.element.nativeElement.classList.toggle('ai-terminal-panel-visible', this.visible)
 
-        const lines = this.recentOutput.split(/\r?\n/).filter(Boolean)
+        const lines = this.getDisplayOutputLines()
         this.output.textContent = lines.slice(-VISIBLE_OUTPUT_LINES).join('\n') || 'No terminal output captured yet.'
 
-        if (!this.analysis.textContent) {
-            this.analysis.textContent = 'Ask a question and click Analyze. Suggestions will be generated from recent terminal output.'
+        if (!this.analysis.textContent && !this.runHandle) {
+            this.analysis.textContent = ANALYSIS_PLACEHOLDER
         }
     }
 
@@ -388,6 +433,7 @@ export class AITerminalPanel {
             return
         }
 
+        this.handleInput(`${lines[index].trimEnd()}\r`)
         this.tab.sendInput(`${lines[index].trimEnd()}\r`)
         lines.splice(index, 1)
         this.draft.value = lines.join('\n').replace(/^\n+/, '')
@@ -400,6 +446,7 @@ export class AITerminalPanel {
             .filter(line => line.trim().length > 0)
 
         for (const line of lines) {
+            this.handleInput(`${line}\r`)
             this.tab.sendInput(`${line}\r`)
         }
         this.draft.value = ''
@@ -450,6 +497,144 @@ export class AITerminalPanel {
         return input
             .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
             .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
+    }
+
+    private trimRecentOutput (): void {
+        const limit = this.getSessionOutputLimit()
+        if (this.recentOutputLines.length > limit) {
+            this.recentOutputLines = this.recentOutputLines.slice(-limit)
+        }
+    }
+
+    private getSessionOutputLimit (): number {
+        const value = Number(this.config.store.aiTerminal.maxSessionOutputLines)
+        if (!Number.isFinite(value) || value < 1) {
+            return 100
+        }
+        return Math.floor(value)
+    }
+
+    private getRecentOutputText (): string {
+        return this.recentOutputLines.join('\n')
+    }
+
+    private getDisplayOutputLines (): string[] {
+        const pendingLine = this.normalizeOutputLine(this.pendingOutput)
+        if (!pendingLine || (this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts())) {
+            return this.recentOutputLines
+        }
+        return [...this.recentOutputLines, pendingLine]
+    }
+
+    private handleTerminalSubmit (allowEmptyInputSuppression = true): boolean {
+        const hasInput = this.currentInputLine.trim().length > 0
+        if (this.shouldIgnoreEmptyEnterPrompts() && !hasInput && allowEmptyInputSuppression) {
+            this.skipNextEmptyInputOutputLine = true
+        } else {
+            this.skipNextEmptyInputOutputLine = false
+        }
+        this.currentInputLine = ''
+        return hasInput
+    }
+
+    private shouldIgnoreEmptyEnterPrompts (): boolean {
+        return Boolean(this.config.store.aiTerminal.ignoreEmptyEnterPrompts)
+    }
+
+    private trackTerminalInput (input: string): void {
+        const text = input
+            .replace(/\x1b\[200~/g, '')
+            .replace(/\x1b\[201~/g, '')
+        let sawCommandSubmitInThisInput = false
+
+        for (let index = 0; index < text.length; index++) {
+            const char = text[index]
+
+            if (char === '\x1b') {
+                index = this.skipEscapeSequence(text, index)
+                continue
+            }
+
+            if (char === '\r' || char === '\n') {
+                if (char === '\r' && text[index + 1] === '\n') {
+                    index++
+                }
+                const hadInput = this.handleTerminalSubmit(!sawCommandSubmitInThisInput)
+                sawCommandSubmitInThisInput ||= hadInput
+                continue
+            }
+
+            this.currentInputLine = this.applyInputCharacter(this.currentInputLine, char)
+            if (this.currentInputLine.trim().length > 0) {
+                this.skipNextEmptyInputOutputLine = false
+            }
+        }
+    }
+
+    private appendOutputLine (line: string): void {
+        const normalizedLine = this.normalizeOutputLine(line)
+        if (!normalizedLine.trim()) {
+            return
+        }
+
+        if (this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts()) {
+            this.skipNextEmptyInputOutputLine = false
+            return
+        }
+
+        this.skipNextEmptyInputOutputLine = false
+        this.recentOutputLines.push(normalizedLine)
+        this.trimRecentOutput()
+    }
+
+    private flushPendingOutput (): void {
+        if (!this.pendingOutput.trim()) {
+            this.pendingOutput = ''
+            return
+        }
+
+        this.appendOutputLine(this.pendingOutput)
+        this.pendingOutput = ''
+    }
+
+    private normalizeOutputLine (line: string): string {
+        return this.stripAnsi(line).replace(/\s+$/g, '')
+    }
+
+    private skipEscapeSequence (text: string, startIndex: number): number {
+        if (text[startIndex + 1] !== '[') {
+            return startIndex
+        }
+
+        let index = startIndex + 2
+        while (index < text.length && !/[@-~]/.test(text[index])) {
+            index++
+        }
+        return Math.min(index, text.length - 1)
+    }
+
+    private applyInputCharacter (current: string, char: string): string {
+        if (char === '\b' || char === '\x7f') {
+            return current.slice(0, -1)
+        }
+
+        if (char === '\u0015') {
+            return ''
+        }
+
+        if (char === '\u0017') {
+            return current.replace(/\S+\s*$/, '')
+        }
+
+        if (char === '\u0003') {
+            return ''
+        }
+
+        if (char < ' ' && char !== '\t') {
+            return current
+        }
+
+        return `${current}${char}`
     }
 
 }

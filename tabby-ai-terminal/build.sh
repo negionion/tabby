@@ -57,7 +57,7 @@ if ! command -v tar >/dev/null 2>&1; then
     exit 1
 fi
 
-tar -a -cf "$EXPORT_DIR/$PLUGIN_NAME.zip" -C "$EXPORT_DIR/node_modules" "$PLUGIN_NAME"
+tar -a -cf "$EXPORT_DIR/$PLUGIN_NAME.tar" -C "$EXPORT_DIR/node_modules" "$PLUGIN_NAME"
 
 echo "Packaged plugin: $PACKAGE_DIR"
-echo "Created archive: $EXPORT_DIR/$PLUGIN_NAME.zip"
+echo "Created archive: $EXPORT_DIR/$PLUGIN_NAME.tar"
