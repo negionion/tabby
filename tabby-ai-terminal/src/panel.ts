@@ -1,7 +1,6 @@
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { Subscription } from 'rxjs'
-import { ConfigService } from 'tabby-core'
-import { SuggestedCommand } from './analysis'
+import { ConfigService, PlatformService } from 'tabby-core'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
 import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
@@ -17,6 +16,7 @@ export class AITerminalPanel {
     private providerRunner: AIProviderRunnerService
     private header: HTMLElement
     private headerControls: HTMLElement
+    private referenceFolderRow: HTMLElement
     private signedInIdentity: HTMLElement
     private providerSelect: HTMLSelectElement
     private modelSelect: HTMLSelectElement
@@ -27,8 +27,12 @@ export class AITerminalPanel {
     private loginOnlyLoginButton: HTMLButtonElement
     private clearLatestButton: HTMLButtonElement
     private resetSessionButton: HTMLButtonElement
+    private referenceFolderButton: HTMLButtonElement
+    private clearReferenceFolderButton: HTMLButtonElement
+    private referenceFolderPathElement: HTMLElement
     private analyzeButton: HTMLButtonElement
     private cancelButton: HTMLButtonElement
+    private runningIndicator: HTMLElement
     private question: HTMLTextAreaElement
     private chatBody: HTMLElement
     private chatStack: HTMLElement
@@ -39,7 +43,6 @@ export class AITerminalPanel {
     private latestOutputMeta: HTMLElement
     private output: HTMLTextAreaElement
     private currentAnalysis: HTMLPreElement|null = null
-    private suggestions: HTMLElement
     private draft: HTMLTextAreaElement
     private recentOutputLines: string[] = []
     private pendingOutput = ''
@@ -52,6 +55,7 @@ export class AITerminalPanel {
     private chatAutoScroll = true
     private pendingLoginRefreshes = 0
     private aiSessionID: string|null = null
+    private referenceFolder: string|null = null
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
     private statusSubscription: Subscription
@@ -65,6 +69,7 @@ export class AITerminalPanel {
         providerAuth: AIProviderAuthService,
         providerRunner: AIProviderRunnerService,
         private config: ConfigService,
+        private platform: PlatformService,
     ) {
         this.providerAuth = providerAuth
         this.providerRunner = providerRunner
@@ -83,6 +88,9 @@ export class AITerminalPanel {
 
         this.headerControls = document.createElement('div')
         this.headerControls.className = 'ai-provider-controls'
+
+        this.referenceFolderRow = document.createElement('div')
+        this.referenceFolderRow.className = 'ai-reference-folder-row'
 
         this.signedInIdentity = document.createElement('div')
         this.signedInIdentity.className = 'ai-provider-identity'
@@ -126,10 +134,15 @@ export class AITerminalPanel {
         this.clearLatestButton = this.button('Clear Latest', 'secondary', () => this.clearLatestSessionOutput())
         this.resetSessionButton = this.button('Reset Session', 'secondary', () => this.resetSession())
         this.resetSessionButton.classList.add('ai-reset-session-button')
+        this.referenceFolderButton = this.button('Select Folder', 'secondary', () => this.selectReferenceFolder())
+        this.clearReferenceFolderButton = this.button('Clear Folder', 'secondary', () => this.clearReferenceFolder())
+        this.referenceFolderPathElement = document.createElement('span')
+        this.referenceFolderPathElement.className = 'ai-reference-folder-path'
         this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
         this.analyzeButton.classList.add('ai-analyze-button')
         this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
         this.cancelButton.hidden = true
+        this.runningIndicator = this.createRunningIndicator()
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
         this.question.addEventListener('keydown', event => {
@@ -170,10 +183,7 @@ export class AITerminalPanel {
             }
         })
 
-        this.suggestions = document.createElement('div')
-        this.suggestions.className = 'ai-chat-suggestions'
-        this.suggestions.hidden = true
-        this.chatViewport.append(this.chatHistory, this.suggestions)
+        this.chatViewport.append(this.chatHistory)
         this.chatStack.append(this.chatViewport, this.latestOutputDetails)
         this.chatBody.append(this.chatStack, this.question)
 
@@ -185,7 +195,8 @@ export class AITerminalPanel {
             this.resetSessionButton,
             this.headerLogoutButton,
         )
-        this.header.append(this.signedInIdentity, this.headerControls)
+        this.referenceFolderRow.append(this.referenceFolderPathElement, this.clearReferenceFolderButton, this.referenceFolderButton)
+        this.header.append(this.signedInIdentity, this.headerControls, this.referenceFolderRow)
 
         this.loginOnly.append(
             this.section('AI Provider', this.statusLine, [
@@ -194,7 +205,7 @@ export class AITerminalPanel {
             ]),
         )
 
-        const chatSection = this.section('AI Chat Panel', this.chatBody, [this.clearLatestButton, this.analyzeButton, this.cancelButton])
+        const chatSection = this.section('AI Chat Panel', this.chatBody, [this.clearLatestButton, this.runningIndicator, this.analyzeButton, this.cancelButton])
         chatSection.classList.add('ai-chat-section')
         this.content.append(chatSection)
 
@@ -292,12 +303,11 @@ export class AITerminalPanel {
         this.flushPendingOutput()
         this.skipNextEmptyInputOutputLine = false
         this.trimRecentOutput()
-        const question = this.question.value.trim()
-        const terminalOutput = this.getRecentOutputText()
+        const question = this.redactSensitiveText(this.question.value.trim())
+        const terminalOutput = this.redactSensitiveText(this.getRecentOutputText())
         this.currentAnalysis = this.appendSentChatMessage(question, terminalOutput)
         this.clearLatestSessionOutput()
         this.draft.value = ''
-        this.renderSuggestions([])
         this.setRunning(true)
 
         try {
@@ -305,6 +315,7 @@ export class AITerminalPanel {
                 {
                     provider: this.providerAuth.getSelectedProvider(),
                     sessionID: this.aiSessionID,
+                    referenceFolder: this.referenceFolder,
                     question,
                     terminalOutput,
                 },
@@ -372,11 +383,15 @@ export class AITerminalPanel {
     private setRunning (running: boolean): void {
         this.analyzeButton.disabled = running
         this.cancelButton.hidden = !running
+        this.runningIndicator.classList.toggle('is-active', running)
+        this.runningIndicator.setAttribute('aria-hidden', running ? 'false' : 'true')
         this.question.disabled = running
         this.modelSelect.disabled = running
         this.headerLogoutButton.disabled = running
         this.clearLatestButton.disabled = running
         this.resetSessionButton.disabled = running
+        this.referenceFolderButton.disabled = running
+        this.clearReferenceFolderButton.disabled = running
     }
 
     private render (): void {
@@ -400,6 +415,7 @@ export class AITerminalPanel {
             this.output.value = outputText
         }
         this.latestOutputMeta.textContent = this.formatLineCount(lines.length)
+        this.renderReferenceFolder()
         this.scheduleDynamicLayoutUpdate()
     }
 
@@ -500,6 +516,7 @@ export class AITerminalPanel {
         this.modelSelect.hidden = !signedIn
         this.resetSessionButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn
+        this.referenceFolderRow.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
         this.signedIn = signedIn
         if (signedIn) {
@@ -555,34 +572,6 @@ export class AITerminalPanel {
         option.value = value
         option.textContent = label
         return option
-    }
-
-    private renderSuggestions (suggestedCommands: SuggestedCommand[]): void {
-        this.suggestions.replaceChildren()
-        if (!suggestedCommands.length) {
-            this.suggestions.hidden = true
-            return
-        }
-
-        this.suggestions.hidden = false
-        for (const item of suggestedCommands) {
-            const card = document.createElement('div')
-            card.className = 'ai-command-card'
-
-            const command = document.createElement('code')
-            command.className = 'ai-command'
-            command.textContent = item.command
-
-            const reason = document.createElement('div')
-            reason.className = 'ai-command-reason'
-            reason.textContent = item.reason
-
-            card.append(command, reason, this.button('Insert to Sender', 'secondary', () => {
-                this.draft.value = [this.draft.value.trimEnd(), item.command].filter(Boolean).join('\n')
-            }))
-            this.suggestions.appendChild(card)
-        }
-        this.scrollChatToBottom()
     }
 
     private appendSentChatMessage (question: string, terminalOutput: string): HTMLPreElement {
@@ -648,7 +637,7 @@ export class AITerminalPanel {
         this.draft.value = ''
     }
 
-    private section (title: string, body: HTMLElement, buttons: HTMLButtonElement[] = []): HTMLElement {
+    private section (title: string, body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
         const section = document.createElement('div')
         section.className = 'ai-panel-section'
 
@@ -761,12 +750,74 @@ export class AITerminalPanel {
             return
         }
 
+        this.resetAIChatSession()
+    }
+
+    private async selectReferenceFolder (): Promise<void> {
+        if (this.runHandle) {
+            return
+        }
+        const folder = await this.platform.pickDirectory()
+        if (!folder || folder === this.referenceFolder) {
+            return
+        }
+        if (!await this.confirmSessionResetForReferenceFolderChange()) {
+            return
+        }
+
+        this.referenceFolder = folder
+        this.render()
+    }
+
+    private async clearReferenceFolder (): Promise<void> {
+        if (this.runHandle || !this.referenceFolder) {
+            return
+        }
+        if (!await this.confirmSessionResetForReferenceFolderChange()) {
+            return
+        }
+
+        this.referenceFolder = null
+        this.render()
+    }
+
+    private async confirmSessionResetForReferenceFolderChange (): Promise<boolean> {
+        if (!this.aiSessionID) {
+            return true
+        }
+        if (!await this.providerAuth.confirmResetSession()) {
+            return false
+        }
+        this.resetAIChatSession()
+        return true
+    }
+
+    private resetAIChatSession (): void {
         this.aiSessionID = null
         this.currentAnalysis = null
         this.chatHistory.replaceChildren()
-        this.renderSuggestions([])
         this.draft.value = ''
         this.renderProviderIdentity()
+    }
+
+    private renderReferenceFolder (): void {
+        const hasFolder = Boolean(this.referenceFolder)
+        this.clearReferenceFolderButton.hidden = !hasFolder
+        this.referenceFolderPathElement.hidden = !hasFolder
+        if (!this.referenceFolder) {
+            this.referenceFolderPathElement.textContent = ''
+            this.referenceFolderPathElement.removeAttribute('title')
+            return
+        }
+
+        this.referenceFolderPathElement.textContent = this.formatReferenceFolderPath(this.referenceFolder)
+        this.referenceFolderPathElement.title = this.referenceFolder
+    }
+
+    private formatReferenceFolderPath (folder: string): string {
+        const normalized = folder.replace(/\\/g, '/').replace(/\/+$/g, '')
+        const name = normalized.split('/').filter(Boolean).pop()
+        return name ? `.../${name}` : normalized
     }
 
     private updateLatestOutputFromEditor (): void {
@@ -839,6 +890,23 @@ export class AITerminalPanel {
         return button
     }
 
+    private createRunningIndicator (): HTMLElement {
+        const indicator = document.createElement('span')
+        indicator.className = 'ai-running-indicator'
+        indicator.setAttribute('role', 'status')
+        indicator.setAttribute('aria-live', 'polite')
+        indicator.setAttribute('aria-hidden', 'true')
+
+        const spinner = document.createElement('span')
+        spinner.className = 'ai-running-spinner'
+
+        const label = document.createElement('span')
+        label.textContent = 'Thinking...'
+
+        indicator.append(spinner, label)
+        return indicator
+    }
+
     private stripAnsi (input: string): string {
         return input
             .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
@@ -862,6 +930,19 @@ export class AITerminalPanel {
 
     private getRecentOutputText (): string {
         return this.recentOutputLines.join('\n')
+    }
+
+    private redactSensitiveText (text: string): string {
+        return text
+            .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[redacted-private-key]')
+            .replace(/(authorization\s*:\s*bearer\s+)[^\s'"]+/gi, '$1[redacted]')
+            .replace(/\b(sk-[A-Za-z0-9_-]{20,})\b/g, '[redacted-openai-key]')
+            .replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[redacted-github-token]')
+            .replace(/\b(AKIA[0-9A-Z]{16})\b/g, '[redacted-aws-key]')
+            .replace(/\b(xox[baprs]-[A-Za-z0-9-]{20,})\b/g, '[redacted-slack-token]')
+            .replace(/:\/\/([^:\s/@]+):([^@\s]+)@/g, '://[redacted]@')
+            .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*([:=])\s*(["'])(?:(?!\3).)*\3/gi, '$1$2$3[redacted]$3')
+            .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*([:=])\s*([^\s'"]+)/gi, '$1$2[redacted]')
     }
 
     private countOutputLines (output: string): number {

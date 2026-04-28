@@ -11,6 +11,7 @@ import { DEFAULT_AI_TERMINAL_SYSTEM_PROMPT } from '../config'
 export interface AIProviderRunRequest {
     provider: AIProviderID
     sessionID: string|null
+    referenceFolder: string|null
     question: string
     terminalOutput: string
 }
@@ -26,6 +27,10 @@ export interface AIProviderRunHandlers {
     done: (exitCode: number|null) => void
 }
 
+interface ReferenceFolderPaths {
+    nativePath: string
+}
+
 @Injectable({ providedIn: 'root' })
 export class AIProviderRunnerService {
     constructor (
@@ -39,17 +44,39 @@ export class AIProviderRunnerService {
             throw new Error(`${provider.label} is not supported yet`)
         }
 
-        const child = this.spawnCodex(request)
+        const referenceFolder = this.resolveReferenceFolder(request.referenceFolder)
+        const prompt = this.buildPrompt(request, referenceFolder)
+        const child = this.spawnCodex(request, referenceFolder)
         let stderr = ''
+        let detectedSessionID = request.sessionID
+        let outputForSessionID = ''
         const startedAt = Date.now()
-        child.stdout.on('data', data => handlers.output(this.stripAnsi(data.toString())))
+        child.stdout.on('data', data => {
+            const chunk = this.stripAnsi(data.toString())
+            if (!detectedSessionID) {
+                outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
+                detectedSessionID = this.extractSessionID(outputForSessionID)
+                if (detectedSessionID) {
+                    handlers.session(detectedSessionID)
+                }
+            }
+            handlers.output(chunk)
+        })
         child.stderr.on('data', data => {
-            stderr = `${stderr}${this.stripAnsi(data.toString())}`
+            const chunk = this.stripAnsi(data.toString())
+            stderr = `${stderr}${chunk}`
+            if (!detectedSessionID) {
+                outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
+                detectedSessionID = this.extractSessionID(outputForSessionID)
+                if (detectedSessionID) {
+                    handlers.session(detectedSessionID)
+                }
+            }
         })
         child.once('error', error => handlers.error(`${error.message}\n`))
         child.once('close', code => {
-            const sessionID = request.sessionID ?? this.findRecentCodexSessionID(startedAt)
-            if (sessionID) {
+            const sessionID = detectedSessionID ?? this.findRecentCodexSessionID(startedAt)
+            if (sessionID && sessionID !== detectedSessionID) {
                 handlers.session(sessionID)
             }
             if (code && code !== 0 && stderr.trim()) {
@@ -58,7 +85,7 @@ export class AIProviderRunnerService {
             handlers.done(code)
         })
 
-        child.stdin.end(this.buildPrompt(request))
+        child.stdin.end(prompt)
 
         return {
             cancel: () => {
@@ -69,10 +96,12 @@ export class AIProviderRunnerService {
         }
     }
 
-    private spawnCodex (request: AIProviderRunRequest): ChildProcessWithoutNullStreams {
+    private spawnCodex (request: AIProviderRunRequest, referenceFolder: ReferenceFolderPaths|null): ChildProcessWithoutNullStreams {
         const args = request.sessionID ? [
             'exec',
             'resume',
+            '-c',
+            'sandbox_mode="read-only"',
             '--skip-git-repo-check',
         ] : [
             'exec',
@@ -92,7 +121,28 @@ export class AIProviderRunnerService {
         args.push('-')
 
         const invocation = this.providerAuth.buildProviderCommandInvocation('codex', args)
-        return spawn(invocation.command, invocation.args, { env: invocation.env })
+        return spawn(invocation.command, invocation.args, { env: invocation.env, cwd: referenceFolder?.nativePath })
+    }
+
+    private resolveReferenceFolder (folder: string|null): ReferenceFolderPaths|null {
+        const trimmed = folder?.trim()
+        if (!trimmed) {
+            return null
+        }
+
+        const resolved = path.resolve(trimmed)
+        let stat: fs.Stats
+        try {
+            stat = fs.statSync(resolved)
+        } catch {
+            throw new Error(`Reference folder does not exist: ${resolved}`)
+        }
+        if (!stat.isDirectory()) {
+            throw new Error(`Reference folder is not a directory: ${resolved}`)
+        }
+        return {
+            nativePath: resolved,
+        }
     }
 
     private findRecentCodexSessionID (startedAt: number): string|null {
@@ -156,7 +206,7 @@ export class AIProviderRunnerService {
         }
     }
 
-    private buildPrompt (request: AIProviderRunRequest): string {
+    private buildPrompt (request: AIProviderRunRequest, referenceFolder: ReferenceFolderPaths|null): string {
         const systemPrompt = this.config.store.aiTerminal.systemPrompt?.trim() || DEFAULT_AI_TERMINAL_SYSTEM_PROMPT
         return [
             '<system_instructions>',
@@ -164,14 +214,25 @@ export class AIProviderRunnerService {
             '</system_instructions>',
             '',
             '<user_request>',
-            request.question.trim() || 'Analyze the recent terminal output.',
+            this.escapePromptContent(request.question.trim() || 'Analyze the recent terminal output.'),
             '</user_request>',
             '',
             '<terminal_output>',
-            request.terminalOutput.trim() || 'No recent terminal output captured.',
+            this.escapePromptContent(request.terminalOutput.trim() || 'No recent terminal output captured.'),
             '</terminal_output>',
             '',
+            '<reference_folder>',
+            this.escapePromptContent(referenceFolder?.nativePath || 'No local reference folder selected.'),
+            '</reference_folder>',
+            '',
         ].join('\n')
+    }
+
+    private escapePromptContent (input: string): string {
+        return input
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
     }
 
     private stripAnsi (input: string): string {

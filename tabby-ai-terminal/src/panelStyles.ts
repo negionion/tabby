@@ -81,6 +81,25 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-reset-session-button {
     margin-left: auto;
 }
+.ai-reference-folder-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: nowrap;
+}
+.ai-reference-folder-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: #a9bed1;
+    font-size: calc(var(--ai-terminal-font-size) * 0.92);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ai-reference-folder-row .btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
 .ai-terminal-content {
     flex: 1;
     min-height: 0;
@@ -287,12 +306,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
     max-height: none;
     overflow: visible;
 }
-.ai-chat-suggestions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-.ai-chat-suggestions[hidden] { display: none; }
 .ai-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .ai-terminal-sender .ai-panel-actions {
     justify-content: flex-end;
@@ -300,10 +313,32 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-chat-section > .ai-panel-actions {
     flex: 0 0 auto;
 }
-.ai-chat-section > .ai-panel-actions .ai-analyze-button {
+.ai-running-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     margin-left: auto;
+    color: #a9bed1;
+    font-size: var(--ai-terminal-font-size);
+    line-height: 1;
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+    white-space: nowrap;
 }
-.ai-command-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); }
-.ai-command { font-size: var(--ai-terminal-font-size); color: #fff1b8; }
-.ai-command-reason, .ai-empty { font-size: var(--ai-terminal-font-size); color: #a9bed1; }
+.ai-running-indicator.is-active {
+    opacity: 1;
+    visibility: visible;
+}
+.ai-running-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(169, 190, 209, 0.25);
+    border-top-color: #8ed4ff;
+    border-radius: 50%;
+    animation: ai-terminal-spin 0.8s linear infinite;
+}
+@keyframes ai-terminal-spin {
+    to { transform: rotate(360deg); }
+}
 `
