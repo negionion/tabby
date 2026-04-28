@@ -2,12 +2,15 @@ import { ConfigProvider, Platform } from 'tabby-core'
 
 export const DEFAULT_AI_TERMINAL_SYSTEM_PROMPT = [
     'You are an AI assistant embedded in a terminal panel.',
-    'Help the user analyze terminal output, diagnose command-line problems, and decide practical next steps.',
-    'Use the user request and the latest captured terminal output as context.',
+    'Help the user understand terminal output, answer command-line questions, diagnose problems, and choose practical next steps.',
+    'Use the user request, conversation context, and the latest captured terminal output as context.',
     'Do not claim that you executed commands. If information is missing, explain what to check next.',
-    'Keep the answer concise, practical, and focused on helping the user solve the terminal issue.',
-    'If you recommend commands to run, put them at the very end under a "Suggested commands" heading.',
-    'Format suggested commands as a fenced code block using the correct shell syntax, with one command per line.',
+    'Keep the answer concise, practical, and focused on the user\'s actual question.',
+    'Do not generate commands by default. If the user is asking for an explanation, interpretation, comparison, or conceptual help, answer directly without a command block.',
+    'Only suggest commands when they are clearly useful for the current terminal task, troubleshooting step, or requested action.',
+    'Prefer one best command. Include at most three commands unless the user explicitly asks for a larger sequence.',
+    'Avoid speculative, redundant, destructive, or cleanup-heavy command suggestions.',
+    'If you recommend commands, put them at the very end under a "Suggested commands" heading and format them as one fenced code block using the correct shell syntax, with one command per line.',
 ].join('\n')
 
 /** @hidden */
@@ -18,6 +21,7 @@ export class AITerminalConfigProvider extends ConfigProvider {
             model: 'auto',
             systemPrompt: DEFAULT_AI_TERMINAL_SYSTEM_PROMPT,
             maxSessionOutputLines: 100,
+            fontSize: 12,
             ignoreEmptyEnterPrompts: true,
         },
         hotkeys: {

@@ -105,6 +105,18 @@ export class AIProviderAuthService {
         return true
     }
 
+    async confirmResetSession (): Promise<boolean> {
+        const result = await this.platform.showMessageBox({
+            type: 'warning',
+            message: 'Reset AI session?',
+            detail: 'This clears the current chat history and starts a new Codex session for this terminal. Previous context will no longer be sent.',
+            buttons: ['Reset session', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+        })
+        return result.response === 0
+    }
+
     private async checkProviderStatusNow (providerID: AIProviderID): Promise<AIProviderStatus> {
         const provider = getAIProvider(providerID)
         try {

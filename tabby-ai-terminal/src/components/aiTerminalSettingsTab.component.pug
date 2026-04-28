@@ -24,6 +24,19 @@ h3.mb-3(translate) AI terminal
 
 .form-line
     .header
+        .title(translate) AI terminal font size
+        .description(translate) Font size used by the AI terminal panel and sender.
+    input.form-control(
+        type='number',
+        min='8',
+        max='24',
+        step='1',
+        [(ngModel)]='config.store.aiTerminal.fontSize',
+        (ngModelChange)='fixFontSize(); config.save()',
+    )
+
+.form-line
+    .header
         .title(translate) Ignore terminal empty input
         .description(translate) Skip terminal output caused by pressing Enter on an empty line, while still keeping prompts after real commands.
     toggle(

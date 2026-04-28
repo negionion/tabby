@@ -20,4 +20,13 @@ export class AITerminalSettingsTabComponent {
             this.config.store.aiTerminal.maxSessionOutputLines = Math.floor(value)
         }
     }
+
+    fixFontSize (): void {
+        const value = Number(this.config.store.aiTerminal.fontSize)
+        if (!Number.isFinite(value) || value < 8) {
+            this.config.store.aiTerminal.fontSize = 12
+        } else {
+            this.config.store.aiTerminal.fontSize = Math.min(24, Math.floor(value))
+        }
+    }
 }

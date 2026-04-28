@@ -6,6 +6,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     margin-bottom: 204px !important;
 }
 .ai-terminal-panel {
+    --ai-terminal-font-size: 12px;
     display: none;
     position: absolute;
     top: 54px;
@@ -20,12 +21,14 @@ export const AI_TERMINAL_PANEL_STYLES = `
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
     user-select: text;
+    font-size: var(--ai-terminal-font-size);
 }
 .ai-terminal-panel.visible {
     display: flex;
     flex-direction: column;
 }
 .ai-terminal-sender {
+    --ai-terminal-font-size: 12px;
     display: none;
     position: absolute;
     left: 10px;
@@ -40,6 +43,13 @@ export const AI_TERMINAL_PANEL_STYLES = `
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
     user-select: text;
+    font-size: var(--ai-terminal-font-size);
+}
+.ai-terminal-panel .btn,
+.ai-terminal-panel .form-control,
+.ai-terminal-sender .btn,
+.ai-terminal-sender .form-control {
+    font-size: var(--ai-terminal-font-size);
 }
 .ai-terminal-sender.visible { display: flex; }
 .ai-terminal-sender .ai-panel-section {
@@ -52,7 +62,25 @@ export const AI_TERMINAL_PANEL_STYLES = `
     min-height: 0;
     resize: none;
 }
-.ai-provider-header { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.ai-provider-header {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.ai-provider-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.ai-provider-controls .btn {
+    white-space: nowrap;
+}
+.ai-reset-session-button {
+    margin-left: auto;
+}
 .ai-terminal-content {
     flex: 1;
     min-height: 0;
@@ -62,14 +90,11 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-provider-select { flex: 1 1 120px; min-width: 0; }
 .ai-model-select { flex: 1 1 130px; min-width: 0; }
 .ai-provider-identity {
-    flex: 1 1 170px;
-    min-width: 0;
     color: #eef6ff;
-    font-size: 12px;
+    font-size: var(--ai-terminal-font-size);
     font-weight: 700;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .ai-provider-status {
     margin: 0;
@@ -79,7 +104,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     word-break: break-word;
     background: rgba(255, 255, 255, 0.05);
     color: #d7e7f5;
-    font-size: 12px;
+    font-size: var(--ai-terminal-font-size);
 }
 .ai-panel-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .ai-chat-section {
@@ -87,7 +112,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     min-height: 0;
     margin-bottom: 0;
 }
-.ai-panel-title { font-size: 12px; font-weight: 700; color: #8fd3ff; }
+.ai-panel-title { font-size: var(--ai-terminal-font-size); font-weight: 700; color: #8fd3ff; }
 .ai-terminal-panel textarea,
 .ai-terminal-sender textarea {
     resize: vertical;
@@ -109,6 +134,8 @@ export const AI_TERMINAL_PANEL_STYLES = `
     min-height: 0;
     display: flex;
     flex-direction: column;
+    --ai-latest-output-collapsed-height: 0px;
+    --ai-chat-scrollbar-gutter: 0px;
 }
 .ai-chat-viewport {
     flex: 1;
@@ -117,8 +144,8 @@ export const AI_TERMINAL_PANEL_STYLES = `
     flex-direction: column;
     gap: 10px;
     overflow: auto;
-    padding-right: 4px;
-    padding-bottom: 42px;
+    padding-right: var(--ai-chat-scrollbar-gutter);
+    padding-bottom: var(--ai-latest-output-collapsed-height);
 }
 .ai-chat-history {
     display: flex;
@@ -143,7 +170,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     background: rgba(88, 166, 255, 0.16);
     border: 1px solid rgba(88, 166, 255, 0.28);
     color: #eef6ff;
-    font-size: 12px;
+    font-size: var(--ai-terminal-font-size);
     white-space: pre-wrap;
     word-break: break-word;
 }
@@ -154,7 +181,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
 }
 .ai-message-label {
     color: #8fd3ff;
-    font-size: 11px;
+    font-size: calc(var(--ai-terminal-font-size) * 0.92);
     font-weight: 700;
     letter-spacing: 0.02em;
     text-transform: uppercase;
@@ -175,7 +202,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     padding: 9px 10px;
     cursor: pointer;
     color: #8fd3ff;
-    font-size: 12px;
+    font-size: var(--ai-terminal-font-size);
     font-weight: 700;
     list-style: none;
 }
@@ -183,7 +210,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-output-summary::before {
     content: '>';
     color: #a9bed1;
-    font-size: 11px;
+    font-size: calc(var(--ai-terminal-font-size) * 0.92);
 }
 .ai-output-collapse[open] > .ai-output-summary::before { content: 'v'; }
 .ai-output-summary span:first-child {
@@ -192,7 +219,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
 }
 .ai-collapse-meta {
     color: #a9bed1;
-    font-size: 11px;
+    font-size: calc(var(--ai-terminal-font-size) * 0.92);
     font-weight: 600;
     white-space: nowrap;
 }
@@ -204,7 +231,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     word-break: break-word;
     background: rgba(255, 255, 255, 0.05);
     color: #d7e7f5;
-    font-size: 12px;
+    font-size: var(--ai-terminal-font-size);
     max-height: 160px;
     overflow: auto;
 }
@@ -216,7 +243,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-chat-stack > .ai-latest-output {
     position: absolute;
     left: 0;
-    right: 4px;
+    right: var(--ai-chat-scrollbar-gutter);
     bottom: 0;
     z-index: 4;
     display: grid;
@@ -267,6 +294,9 @@ export const AI_TERMINAL_PANEL_STYLES = `
 }
 .ai-chat-suggestions[hidden] { display: none; }
 .ai-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ai-terminal-sender .ai-panel-actions {
+    justify-content: flex-end;
+}
 .ai-chat-section > .ai-panel-actions {
     flex: 0 0 auto;
 }
@@ -274,6 +304,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
     margin-left: auto;
 }
 .ai-command-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); }
-.ai-command { font-size: 12px; color: #fff1b8; }
-.ai-command-reason, .ai-empty { font-size: 12px; color: #a9bed1; }
+.ai-command { font-size: var(--ai-terminal-font-size); color: #fff1b8; }
+.ai-command-reason, .ai-empty { font-size: var(--ai-terminal-font-size); color: #a9bed1; }
 `

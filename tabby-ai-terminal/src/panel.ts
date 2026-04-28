@@ -16,6 +16,7 @@ export class AITerminalPanel {
     private providerAuth: AIProviderAuthService
     private providerRunner: AIProviderRunnerService
     private header: HTMLElement
+    private headerControls: HTMLElement
     private signedInIdentity: HTMLElement
     private providerSelect: HTMLSelectElement
     private modelSelect: HTMLSelectElement
@@ -25,15 +26,16 @@ export class AITerminalPanel {
     private headerLogoutButton: HTMLButtonElement
     private loginOnlyLoginButton: HTMLButtonElement
     private clearLatestButton: HTMLButtonElement
+    private resetSessionButton: HTMLButtonElement
     private analyzeButton: HTMLButtonElement
     private cancelButton: HTMLButtonElement
-    private refreshModelsButton: HTMLButtonElement
     private question: HTMLTextAreaElement
     private chatBody: HTMLElement
     private chatStack: HTMLElement
     private chatViewport: HTMLElement
     private chatHistory: HTMLElement
     private latestOutputDetails: HTMLDetailsElement
+    private latestOutputSummary: HTMLElement
     private latestOutputMeta: HTMLElement
     private output: HTMLTextAreaElement
     private currentAnalysis: HTMLPreElement|null = null
@@ -49,10 +51,14 @@ export class AITerminalPanel {
     private lastSenderVisible = false
     private chatAutoScroll = true
     private pendingLoginRefreshes = 0
+    private aiSessionID: string|null = null
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
     private statusSubscription: Subscription
     private runHandle: AIProviderRunHandle|null = null
+    private modelRefreshPromise: Promise<void>|null = null
+    private layoutObserver: ResizeObserver|null = null
+    private layoutFrame: number|null = null
 
     constructor (
         private tab: BaseTerminalTabComponent<any>,
@@ -75,6 +81,9 @@ export class AITerminalPanel {
         this.header = document.createElement('div')
         this.header.className = 'ai-provider-header'
 
+        this.headerControls = document.createElement('div')
+        this.headerControls.className = 'ai-provider-controls'
+
         this.signedInIdentity = document.createElement('div')
         this.signedInIdentity.className = 'ai-provider-identity'
 
@@ -96,6 +105,12 @@ export class AITerminalPanel {
         this.modelSelect.addEventListener('change', () => {
             this.providerAuth.setSelectedModel(this.modelSelect.value)
         })
+        this.modelSelect.addEventListener('pointerdown', () => {
+            void this.refreshModelOptions(true)
+        })
+        this.modelSelect.addEventListener('focus', () => {
+            void this.refreshModelOptions(true)
+        })
         this.refreshModelOptions()
 
         this.statusLine = document.createElement('div')
@@ -106,13 +121,14 @@ export class AITerminalPanel {
         this.content = document.createElement('div')
         this.content.className = 'ai-terminal-content'
 
-        this.headerLogoutButton = this.button('Logout', 'secondary', () => this.logout())
+        this.headerLogoutButton = this.button('Logout', 'danger', () => this.logout())
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
         this.clearLatestButton = this.button('Clear Latest', 'secondary', () => this.clearLatestSessionOutput())
+        this.resetSessionButton = this.button('Reset Session', 'secondary', () => this.resetSession())
+        this.resetSessionButton.classList.add('ai-reset-session-button')
         this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
         this.analyzeButton.classList.add('ai-analyze-button')
         this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
-        this.refreshModelsButton = this.button('Refresh models', 'secondary', () => this.refreshModelOptions(true))
         this.cancelButton.hidden = true
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
@@ -144,6 +160,7 @@ export class AITerminalPanel {
         this.output.addEventListener('blur', () => this.render())
         const latestOutput = this.collapsibleOutput('Latest Session Output', this.output)
         this.latestOutputDetails = latestOutput.details
+        this.latestOutputSummary = latestOutput.summary
         this.latestOutputMeta = latestOutput.meta
         this.latestOutputDetails.classList.add('ai-latest-output')
         this.latestOutputDetails.addEventListener('toggle', () => {
@@ -162,13 +179,13 @@ export class AITerminalPanel {
 
         this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
 
-        this.header.append(
-            this.signedInIdentity,
+        this.headerControls.append(
             this.providerSelect,
             this.modelSelect,
-            this.refreshModelsButton,
+            this.resetSessionButton,
             this.headerLogoutButton,
         )
+        this.header.append(this.signedInIdentity, this.headerControls)
 
         this.loginOnly.append(
             this.section('AI Provider', this.statusLine, [
@@ -183,15 +200,16 @@ export class AITerminalPanel {
 
         this.senderElement.append(
             this.section('Sender / Command Draft', this.draft, [
-                this.button('Send Line', 'success', () => this.sendDraftLine()),
-                this.button('Send All', 'success', () => this.sendDraftAll()),
                 this.button('Clear', 'secondary', () => {
                     this.draft.value = ''
                 }),
+                this.button('Send Line', 'success', () => this.sendDraftLine()),
+                this.button('Send All', 'success', () => this.sendDraftAll()),
             ]),
         )
 
         this.element.append(this.header, this.loginOnly, this.content)
+        this.observeDynamicLayout()
         this.applyProviderStatus({
             provider: this.providerAuth.getSelectedProvider(),
             state: 'checking',
@@ -202,6 +220,11 @@ export class AITerminalPanel {
 
     destroy (): void {
         this.cancelAnalyze()
+        this.layoutObserver?.disconnect()
+        if (this.layoutFrame !== null) {
+            cancelAnimationFrame(this.layoutFrame)
+            this.layoutFrame = null
+        }
         this.statusSubscription.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
@@ -281,10 +304,12 @@ export class AITerminalPanel {
             this.runHandle = this.providerRunner.run(
                 {
                     provider: this.providerAuth.getSelectedProvider(),
+                    sessionID: this.aiSessionID,
                     question,
                     terminalOutput,
                 },
                 {
+                    session: sessionID => this.setAISessionID(sessionID),
                     output: chunk => this.appendAnalysis(chunk),
                     error: chunk => this.appendAnalysis(chunk),
                     done: code => {
@@ -349,12 +374,13 @@ export class AITerminalPanel {
         this.cancelButton.hidden = !running
         this.question.disabled = running
         this.modelSelect.disabled = running
-        this.refreshModelsButton.disabled = running
         this.headerLogoutButton.disabled = running
         this.clearLatestButton.disabled = running
+        this.resetSessionButton.disabled = running
     }
 
     private render (): void {
+        this.applyFontSize()
         this.trimRecentOutput()
         const senderVisible = this.visible && this.signedIn
         this.element.classList.toggle('visible', this.visible)
@@ -374,6 +400,26 @@ export class AITerminalPanel {
             this.output.value = outputText
         }
         this.latestOutputMeta.textContent = this.formatLineCount(lines.length)
+        this.scheduleDynamicLayoutUpdate()
+    }
+
+    private applyFontSize (): void {
+        const fontSize = this.getFontSize()
+        this.element.style.setProperty('--ai-terminal-font-size', `${fontSize}px`)
+        this.senderElement.style.setProperty('--ai-terminal-font-size', `${fontSize}px`)
+    }
+
+    private getFontSize (): number {
+        const value = Number(this.config.store.aiTerminal.fontSize)
+        if (!Number.isFinite(value) || value < 8) {
+            return 12
+        }
+        return Math.min(24, Math.floor(value))
+    }
+
+    private setAISessionID (sessionID: string): void {
+        this.aiSessionID = sessionID
+        this.renderProviderIdentity()
     }
 
     private refreshAfterFocus = (): void => {
@@ -445,8 +491,6 @@ export class AITerminalPanel {
         this.lastProviderStatus = status
         this.providerSelect.value = status.provider
         this.refreshModelOptions()
-        const provider = AI_PROVIDERS.find(item => item.id === status.provider)
-        this.signedInIdentity.textContent = status.account ? `${provider?.label ?? status.provider} - ${status.account}` : `${provider?.label ?? status.provider}`
         this.statusLine.textContent = status.detail ? `${status.label}\n${status.detail}` : status.label
         const signedIn = status.state === 'logged-in'
         this.loginOnly.hidden = signedIn
@@ -454,14 +498,23 @@ export class AITerminalPanel {
         this.signedInIdentity.hidden = !signedIn
         this.providerSelect.hidden = signedIn
         this.modelSelect.hidden = !signedIn
-        this.refreshModelsButton.hidden = !signedIn
+        this.resetSessionButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
         this.signedIn = signedIn
         if (signedIn) {
             this.pendingLoginRefreshes = 0
         }
+        this.renderProviderIdentity()
         this.render()
+    }
+
+    private renderProviderIdentity (): void {
+        const providerID = this.lastProviderStatus?.provider ?? this.providerAuth.getSelectedProvider()
+        const provider = AI_PROVIDERS.find(item => item.id === providerID)
+        const providerLabel = provider?.label ?? providerID
+        this.signedInIdentity.textContent = this.signedIn ? `${providerLabel} - ${this.aiSessionID ?? 'new session'}` : providerLabel
+        this.signedInIdentity.title = this.signedInIdentity.textContent ?? ''
     }
 
     private shouldRefreshAfterFocus (): boolean {
@@ -469,16 +522,24 @@ export class AITerminalPanel {
     }
 
     private async refreshModelOptions (force = false): Promise<void> {
+        if (this.modelRefreshPromise) {
+            return this.modelRefreshPromise
+        }
+
+        this.modelRefreshPromise = this.refreshModelOptionsNow(force)
+        try {
+            await this.modelRefreshPromise
+        } finally {
+            this.modelRefreshPromise = null
+        }
+    }
+
+    private async refreshModelOptionsNow (force = false): Promise<void> {
         const provider = AI_PROVIDERS.find(item => item.id === this.providerSelect.value) ?? AI_PROVIDERS[0]
         const selectedModel = this.providerAuth.getSelectedModel()
         this.modelSelect.replaceChildren()
         this.modelSelect.appendChild(this.modelOption(selectedModel, selectedModel === 'auto' ? 'Auto model' : selectedModel))
         this.modelSelect.value = selectedModel
-
-        const previousRefreshDisabled = this.refreshModelsButton?.disabled ?? false
-        if (this.refreshModelsButton) {
-            this.refreshModelsButton.disabled = true
-        }
 
         const models = await this.providerAuth.getAvailableModels(provider.id, force)
         const modelOptions = models.includes(selectedModel) ? models : [selectedModel, ...models]
@@ -487,10 +548,6 @@ export class AITerminalPanel {
             this.modelSelect.appendChild(this.modelOption(model, model === 'auto' ? 'Auto model' : model))
         }
         this.modelSelect.value = selectedModel
-
-        if (this.refreshModelsButton) {
-            this.refreshModelsButton.disabled = previousRefreshDisabled || Boolean(this.runHandle)
-        }
     }
 
     private modelOption (value: string, label: string): HTMLOptionElement {
@@ -615,7 +672,7 @@ export class AITerminalPanel {
         return section
     }
 
-    private collapsibleOutput (title: string, body: HTMLElement, metaText = ''): { details: HTMLDetailsElement, meta: HTMLElement } {
+    private collapsibleOutput (title: string, body: HTMLElement, metaText = ''): { details: HTMLDetailsElement, summary: HTMLElement, meta: HTMLElement } {
         const details = document.createElement('details')
         details.className = 'ai-output-collapse'
 
@@ -632,7 +689,45 @@ export class AITerminalPanel {
         summary.append(label, meta)
         details.append(summary, body)
 
-        return { details, meta }
+        return { details, summary, meta }
+    }
+
+    private observeDynamicLayout (): void {
+        if (!window.ResizeObserver) {
+            this.scheduleDynamicLayoutUpdate()
+            return
+        }
+
+        this.layoutObserver = new ResizeObserver(() => this.scheduleDynamicLayoutUpdate())
+        this.layoutObserver.observe(this.chatStack)
+        this.layoutObserver.observe(this.chatViewport)
+        this.layoutObserver.observe(this.latestOutputSummary)
+        this.scheduleDynamicLayoutUpdate()
+    }
+
+    private scheduleDynamicLayoutUpdate (): void {
+        if (this.layoutFrame !== null) {
+            return
+        }
+        this.layoutFrame = requestAnimationFrame(() => {
+            this.layoutFrame = null
+            this.updateDynamicLayout()
+        })
+    }
+
+    private updateDynamicLayout (): void {
+        const detailsStyle = getComputedStyle(this.latestOutputDetails)
+        const borderHeight = this.toPixels(detailsStyle.borderTopWidth) + this.toPixels(detailsStyle.borderBottomWidth)
+        const collapsedHeight = Math.ceil(this.latestOutputSummary.getBoundingClientRect().height + borderHeight)
+        const scrollbarGutter = Math.max(0, this.chatViewport.offsetWidth - this.chatViewport.clientWidth)
+
+        this.chatStack.style.setProperty('--ai-latest-output-collapsed-height', `${collapsedHeight}px`)
+        this.chatStack.style.setProperty('--ai-chat-scrollbar-gutter', `${scrollbarGutter}px`)
+    }
+
+    private toPixels (value: string): number {
+        const parsed = Number.parseFloat(value)
+        return Number.isFinite(parsed) ? parsed : 0
     }
 
     private scrollChatToBottom (force = false): void {
@@ -656,6 +751,22 @@ export class AITerminalPanel {
         this.output.value = ''
         this.latestOutputDetails.open = false
         this.render()
+    }
+
+    private async resetSession (): Promise<void> {
+        if (this.runHandle) {
+            return
+        }
+        if (!await this.providerAuth.confirmResetSession()) {
+            return
+        }
+
+        this.aiSessionID = null
+        this.currentAnalysis = null
+        this.chatHistory.replaceChildren()
+        this.renderSuggestions([])
+        this.draft.value = ''
+        this.renderProviderIdentity()
     }
 
     private updateLatestOutputFromEditor (): void {
@@ -719,7 +830,7 @@ export class AITerminalPanel {
         return element
     }
 
-    private button (label: string, variant: 'primary'|'success'|'secondary', click: () => void): HTMLButtonElement {
+    private button (label: string, variant: 'primary'|'success'|'secondary'|'danger', click: () => void): HTMLButtonElement {
         const button = document.createElement('button')
         button.type = 'button'
         button.className = `btn btn-sm btn-${variant === 'secondary' ? 'outline-secondary' : variant}`
