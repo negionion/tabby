@@ -109,7 +109,15 @@ export class AIProviderAuthService {
         const provider = getAIProvider(providerID)
         try {
             const output = await this.execProviderCommand(provider.command, ['login', 'status'])
-            if (/logged in/i.test(output)) {
+            if (/not logged in|not signed in|logged out/i.test(output)) {
+                return {
+                    provider: provider.id,
+                    state: 'logged-out',
+                    label: `${provider.label} needs sign in`,
+                    detail: output.trim(),
+                }
+            }
+            if (/logged in|signed in/i.test(output)) {
                 return {
                     provider: provider.id,
                     state: 'logged-in',
@@ -145,16 +153,35 @@ export class AIProviderAuthService {
 
     private execProviderCommand (command: string, args: string[]): Promise<string> {
         return new Promise((resolve, reject) => {
-            if (process.platform === 'win32') {
-                execFile('cmd.exe', ['/d', '/s', '/c', [command, ...args].join(' ')], (error, stdout, stderr) => {
-                    this.resolveCommandResult(error, stdout, stderr, resolve, reject)
-                })
-            } else {
-                execFile(command, args, (error, stdout, stderr) => {
-                    this.resolveCommandResult(error, stdout, stderr, resolve, reject)
-                })
-            }
+            const invocation = this.buildProviderCommandInvocation(command, args)
+            execFile(invocation.command, invocation.args, { env: invocation.env }, (error, stdout, stderr) => {
+                this.resolveCommandResult(error, stdout, stderr, resolve, reject)
+            })
         })
+    }
+
+    buildProviderCommandInvocation (command: string, args: string[]): { command: string, args: string[], env: NodeJS.ProcessEnv } {
+        if (process.platform === 'win32') {
+            return {
+                command: 'cmd.exe',
+                args: ['/d', '/s', '/c', this.commandLine([command, ...args])],
+                env: process.env,
+            }
+        }
+
+        if (process.platform === 'darwin') {
+            return {
+                command: this.getUserLoginShell(),
+                args: ['-lic', this.commandLine([command, ...args])],
+                env: this.getAugmentedCommandEnv(),
+            }
+        }
+
+        return {
+            command,
+            args,
+            env: this.getAugmentedCommandEnv(),
+        }
     }
 
     private async fetchAvailableModels (providerID: AIProviderID): Promise<string[]> {
@@ -219,7 +246,7 @@ export class AIProviderAuthService {
             return
         }
         if (process.platform === 'darwin') {
-            const script = `tell application "Terminal" to do script ${JSON.stringify(command)}`
+            const script = `tell application "Terminal" to do script ${JSON.stringify(this.wrapInUserLoginShell(command))}`
             await this.spawnDetached('osascript', ['-e', script])
             return
         }
@@ -254,12 +281,58 @@ export class AIProviderAuthService {
         ]
     }
 
+    private wrapInUserLoginShell (command: string): string {
+        return `exec ${this.commandLine([this.getUserLoginShell(), '-lic', command])}`
+    }
+
+    private getUserLoginShell (): string {
+        return process.env.SHELL || '/bin/zsh'
+    }
+
+    private getAugmentedCommandEnv (): NodeJS.ProcessEnv {
+        const home = process.env.HOME
+        const pathEntries = [
+            '/opt/homebrew/bin',
+            '/opt/homebrew/sbin',
+            '/usr/local/bin',
+            '/usr/local/sbin',
+            home ? `${home}/.npm-global/bin` : null,
+            home ? `${home}/.local/bin` : null,
+            home ? `${home}/.bun/bin` : null,
+            ...(process.env.PATH ?? '').split(':'),
+        ].filter((entry): entry is string => Boolean(entry))
+
+        return {
+            ...process.env,
+            PATH: [...new Set(pathEntries)].join(':'),
+        }
+    }
+
+    private commandLine (args: string[]): string {
+        if (process.platform === 'win32') {
+            return args.map(arg => {
+                if (/^[A-Za-z0-9._/-]+$/.test(arg)) {
+                    return arg
+                }
+                return `"${arg.replace(/"/g, '\\"')}"`
+            }).join(' ')
+        }
+
+        return args.map(arg => {
+            if (/^[A-Za-z0-9._/:=-]+$/.test(arg)) {
+                return arg
+            }
+            return `'${arg.replace(/'/g, "'\\''")}'`
+        }).join(' ')
+    }
+
     private spawnDetached (command: string, args: string[]): Promise<void> {
         return new Promise((resolve, reject) => {
             const child = spawn(command, args, {
                 detached: true,
                 stdio: 'ignore',
                 windowsHide: false,
+                env: this.getAugmentedCommandEnv(),
             })
             child.once('error', reject)
             child.once('spawn', () => {

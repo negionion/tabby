@@ -75,10 +75,8 @@ export class AIProviderRunnerService {
             args.push('-m', model)
         }
 
-        if (process.platform === 'win32') {
-            return spawn('cmd.exe', ['/d', '/s', '/c', this.commandLine(['codex', ...args])])
-        }
-        return spawn('codex', args)
+        const invocation = this.providerAuth.buildProviderCommandInvocation('codex', args)
+        return spawn(invocation.command, invocation.args, { env: invocation.env })
     }
 
     private buildPrompt (request: AIProviderRunRequest): string {
@@ -97,15 +95,6 @@ export class AIProviderRunnerService {
             '</terminal_output>',
             '',
         ].join('\n')
-    }
-
-    private commandLine (args: string[]): string {
-        return args.map(arg => {
-            if (/^[A-Za-z0-9._/-]+$/.test(arg)) {
-                return arg
-            }
-            return `"${arg.replace(/"/g, '\\"')}"`
-        }).join(' ')
     }
 
     private stripAnsi (input: string): string {

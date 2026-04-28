@@ -7,10 +7,12 @@ import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProvi
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 
 const VISIBLE_OUTPUT_LINES = 14
-const ANALYSIS_PLACEHOLDER = 'Ask a question and click Analyze. Suggestions will be generated from recent terminal output.'
+const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
+const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 
 export class AITerminalPanel {
     readonly element: HTMLElement
+    readonly senderElement: HTMLElement
     private providerAuth: AIProviderAuthService
     private providerRunner: AIProviderRunnerService
     private header: HTMLElement
@@ -22,12 +24,19 @@ export class AITerminalPanel {
     private content: HTMLElement
     private headerLogoutButton: HTMLButtonElement
     private loginOnlyLoginButton: HTMLButtonElement
+    private clearLatestButton: HTMLButtonElement
     private analyzeButton: HTMLButtonElement
     private cancelButton: HTMLButtonElement
     private refreshModelsButton: HTMLButtonElement
     private question: HTMLTextAreaElement
-    private output: HTMLElement
-    private analysis: HTMLElement
+    private chatBody: HTMLElement
+    private chatStack: HTMLElement
+    private chatViewport: HTMLElement
+    private chatHistory: HTMLElement
+    private latestOutputDetails: HTMLDetailsElement
+    private latestOutputMeta: HTMLElement
+    private output: HTMLTextAreaElement
+    private currentAnalysis: HTMLPreElement|null = null
     private suggestions: HTMLElement
     private draft: HTMLTextAreaElement
     private recentOutputLines: string[] = []
@@ -35,6 +44,10 @@ export class AITerminalPanel {
     private currentInputLine = ''
     private skipNextEmptyInputOutputLine = false
     private visible = false
+    private signedIn = false
+    private lastPanelVisible = false
+    private lastSenderVisible = false
+    private chatAutoScroll = true
     private pendingLoginRefreshes = 0
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
@@ -54,8 +67,10 @@ export class AITerminalPanel {
         })
         this.element = document.createElement('aside')
         this.element.className = 'ai-terminal-panel'
-        this.element.addEventListener('click', event => event.stopPropagation())
-        this.element.addEventListener('mousedown', event => event.stopPropagation())
+        this.guardTerminalEvents(this.element)
+        this.senderElement = document.createElement('div')
+        this.senderElement.className = 'ai-terminal-sender'
+        this.guardTerminalEvents(this.senderElement)
 
         this.header = document.createElement('div')
         this.header.className = 'ai-provider-header'
@@ -89,18 +104,62 @@ export class AITerminalPanel {
         this.loginOnly = document.createElement('div')
         this.loginOnly.className = 'ai-login-only'
         this.content = document.createElement('div')
+        this.content.className = 'ai-terminal-content'
 
         this.headerLogoutButton = this.button('Logout', 'secondary', () => this.logout())
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
+        this.clearLatestButton = this.button('Clear Latest', 'secondary', () => this.clearLatestSessionOutput())
         this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
+        this.analyzeButton.classList.add('ai-analyze-button')
         this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
         this.refreshModelsButton = this.button('Refresh models', 'secondary', () => this.refreshModelOptions(true))
         this.cancelButton.hidden = true
 
         this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
-        this.output = document.createElement('pre')
-        this.analysis = document.createElement('pre')
+        this.question.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+                return
+            }
+            event.preventDefault()
+            this.analyze()
+        })
+        this.chatBody = document.createElement('div')
+        this.chatBody.className = 'ai-chat-body'
+        this.chatStack = document.createElement('div')
+        this.chatStack.className = 'ai-chat-stack'
+        this.chatViewport = document.createElement('div')
+        this.chatViewport.className = 'ai-chat-viewport'
+        this.chatViewport.addEventListener('scroll', () => {
+            this.chatAutoScroll = this.isChatScrolledToBottom()
+        })
+        this.chatHistory = document.createElement('div')
+        this.chatHistory.className = 'ai-chat-history'
+
+        this.output = document.createElement('textarea')
+        this.output.className = 'ai-output ai-latest-output-editor'
+        this.output.placeholder = EMPTY_OUTPUT_TEXT
+        this.output.spellcheck = false
+        this.output.rows = VISIBLE_OUTPUT_LINES
+        this.output.addEventListener('input', () => this.updateLatestOutputFromEditor())
+        this.output.addEventListener('blur', () => this.render())
+        const latestOutput = this.collapsibleOutput('Latest Session Output', this.output)
+        this.latestOutputDetails = latestOutput.details
+        this.latestOutputMeta = latestOutput.meta
+        this.latestOutputDetails.classList.add('ai-latest-output')
+        this.latestOutputDetails.addEventListener('toggle', () => {
+            this.render()
+            if (this.latestOutputDetails.open) {
+                this.scrollLatestOutputToBottom()
+            }
+        })
+
         this.suggestions = document.createElement('div')
+        this.suggestions.className = 'ai-chat-suggestions'
+        this.suggestions.hidden = true
+        this.chatViewport.append(this.chatHistory, this.suggestions)
+        this.chatStack.append(this.chatViewport, this.latestOutputDetails)
+        this.chatBody.append(this.chatStack, this.question)
+
         this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
 
         this.header.append(
@@ -118,11 +177,11 @@ export class AITerminalPanel {
             ]),
         )
 
-        this.content.append(
-            this.section('AI Chat Panel', this.question, [this.analyzeButton, this.cancelButton]),
-            this.section('Latest Session Output', this.output),
-            this.section('Analysis', this.analysis),
-            this.section('Suggested Commands', this.suggestions),
+        const chatSection = this.section('AI Chat Panel', this.chatBody, [this.clearLatestButton, this.analyzeButton, this.cancelButton])
+        chatSection.classList.add('ai-chat-section')
+        this.content.append(chatSection)
+
+        this.senderElement.append(
             this.section('Sender / Command Draft', this.draft, [
                 this.button('Send Line', 'success', () => this.sendDraftLine()),
                 this.button('Send All', 'success', () => this.sendDraftAll()),
@@ -146,6 +205,8 @@ export class AITerminalPanel {
         this.statusSubscription.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
+        this.tab.element.nativeElement.classList.remove('ai-terminal-sender-visible')
+        this.senderElement.remove()
         this.element.remove()
     }
 
@@ -163,7 +224,11 @@ export class AITerminalPanel {
             this.pendingOutput = this.pendingOutput.slice(newlineIndex + 1)
             newlineIndex = this.pendingOutput.indexOf('\n')
         }
+        const shouldStickToBottom = this.latestOutputDetails.open && this.isLatestOutputScrolledToBottom()
         this.render()
+        if (shouldStickToBottom) {
+            this.scrollLatestOutputToBottom()
+        }
     }
 
     handleInput (data: string|Buffer): void {
@@ -204,9 +269,10 @@ export class AITerminalPanel {
         this.flushPendingOutput()
         this.skipNextEmptyInputOutputLine = false
         this.trimRecentOutput()
-        const question = this.question.value
+        const question = this.question.value.trim()
         const terminalOutput = this.getRecentOutputText()
-        this.analysis.textContent = ''
+        this.currentAnalysis = this.appendSentChatMessage(question, terminalOutput)
+        this.clearLatestSessionOutput()
         this.draft.value = ''
         this.renderSuggestions([])
         this.setRunning(true)
@@ -231,8 +297,6 @@ export class AITerminalPanel {
                 },
             )
             this.question.value = ''
-            this.recentOutputLines = []
-            this.pendingOutput = ''
             this.currentInputLine = ''
             this.skipNextEmptyInputOutputLine = false
             this.render()
@@ -253,16 +317,18 @@ export class AITerminalPanel {
         if (!chunk) {
             return
         }
-        if (this.analysis.textContent === ANALYSIS_PLACEHOLDER) {
-            this.analysis.textContent = ''
+        const analysis = this.currentAnalysis ?? this.appendSentChatMessage('', '')
+        this.currentAnalysis = analysis
+        if (analysis.textContent === ANALYSIS_PLACEHOLDER) {
+            analysis.textContent = ''
         }
-        this.analysis.textContent = `${this.analysis.textContent}${chunk}`
-        this.analysis.scrollTop = this.analysis.scrollHeight
-        this.syncDraftFromAnalysisCodeBlock()
+        analysis.textContent = `${analysis.textContent}${chunk}`
+        this.syncDraftFromAnalysisCodeBlock(analysis.textContent ?? '')
+        this.scrollChatToBottom()
     }
 
-    private syncDraftFromAnalysisCodeBlock (): void {
-        const commandBlock = this.extractLastCodeBlock(this.analysis.textContent ?? '')
+    private syncDraftFromAnalysisCodeBlock (analysisText: string): void {
+        const commandBlock = this.extractLastCodeBlock(analysisText)
         if (commandBlock === null) {
             return
         }
@@ -285,19 +351,29 @@ export class AITerminalPanel {
         this.modelSelect.disabled = running
         this.refreshModelsButton.disabled = running
         this.headerLogoutButton.disabled = running
+        this.clearLatestButton.disabled = running
     }
 
     private render (): void {
         this.trimRecentOutput()
+        const senderVisible = this.visible && this.signedIn
         this.element.classList.toggle('visible', this.visible)
+        this.senderElement.classList.toggle('visible', senderVisible)
         this.tab.element.nativeElement.classList.toggle('ai-terminal-panel-visible', this.visible)
+        this.tab.element.nativeElement.classList.toggle('ai-terminal-sender-visible', senderVisible)
+        if (this.visible !== this.lastPanelVisible || senderVisible !== this.lastSenderVisible) {
+            this.lastPanelVisible = this.visible
+            this.lastSenderVisible = senderVisible
+            this.requestTerminalRefit()
+        }
 
         const lines = this.getDisplayOutputLines()
-        this.output.textContent = lines.slice(-VISIBLE_OUTPUT_LINES).join('\n') || 'No terminal output captured yet.'
-
-        if (!this.analysis.textContent && !this.runHandle) {
-            this.analysis.textContent = ANALYSIS_PLACEHOLDER
+        const outputLines = this.latestOutputDetails.open ? lines : lines.slice(-VISIBLE_OUTPUT_LINES)
+        const outputText = outputLines.join('\n')
+        if (document.activeElement !== this.output && this.output.value !== outputText) {
+            this.output.value = outputText
         }
+        this.latestOutputMeta.textContent = this.formatLineCount(lines.length)
     }
 
     private refreshAfterFocus = (): void => {
@@ -381,9 +457,11 @@ export class AITerminalPanel {
         this.refreshModelsButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
+        this.signedIn = signedIn
         if (signedIn) {
             this.pendingLoginRefreshes = 0
         }
+        this.render()
     }
 
     private shouldRefreshAfterFocus (): boolean {
@@ -425,13 +503,11 @@ export class AITerminalPanel {
     private renderSuggestions (suggestedCommands: SuggestedCommand[]): void {
         this.suggestions.replaceChildren()
         if (!suggestedCommands.length) {
-            const empty = document.createElement('div')
-            empty.className = 'ai-empty'
-            empty.textContent = 'No suggestions yet. Click Analyze first.'
-            this.suggestions.appendChild(empty)
+            this.suggestions.hidden = true
             return
         }
 
+        this.suggestions.hidden = false
         for (const item of suggestedCommands) {
             const card = document.createElement('div')
             card.className = 'ai-command-card'
@@ -449,6 +525,44 @@ export class AITerminalPanel {
             }))
             this.suggestions.appendChild(card)
         }
+        this.scrollChatToBottom()
+    }
+
+    private appendSentChatMessage (question: string, terminalOutput: string): HTMLPreElement {
+        const card = document.createElement('div')
+        card.className = 'ai-chat-message'
+
+        const prompt = document.createElement('div')
+        prompt.className = 'ai-chat-question'
+        prompt.textContent = question || 'Analyze the recent terminal output.'
+
+        const output = document.createElement('pre')
+        output.className = 'ai-output ai-output-snapshot'
+        output.textContent = terminalOutput || EMPTY_OUTPUT_TEXT
+
+        const sentOutput = this.collapsibleOutput(
+            'Session Output Sent',
+            output,
+            this.formatLineCount(this.countOutputLines(terminalOutput)),
+        )
+        sentOutput.details.classList.add('ai-chat-output-collapse')
+
+        const analysisBlock = document.createElement('div')
+        analysisBlock.className = 'ai-analysis-block'
+
+        const analysisLabel = document.createElement('div')
+        analysisLabel.className = 'ai-message-label'
+        analysisLabel.textContent = 'Analysis'
+
+        const analysis = document.createElement('pre')
+        analysis.className = 'ai-analysis ai-chat-analysis'
+        analysis.textContent = ANALYSIS_PLACEHOLDER
+
+        analysisBlock.append(analysisLabel, analysis)
+        card.append(prompt, sentOutput.details, analysisBlock)
+        this.chatHistory.appendChild(card)
+        this.scrollChatToBottom(true)
+        return analysis
     }
 
     private sendDraftLine (): void {
@@ -501,6 +615,102 @@ export class AITerminalPanel {
         return section
     }
 
+    private collapsibleOutput (title: string, body: HTMLElement, metaText = ''): { details: HTMLDetailsElement, meta: HTMLElement } {
+        const details = document.createElement('details')
+        details.className = 'ai-output-collapse'
+
+        const summary = document.createElement('summary')
+        summary.className = 'ai-output-summary'
+
+        const label = document.createElement('span')
+        label.textContent = title
+
+        const meta = document.createElement('span')
+        meta.className = 'ai-collapse-meta'
+        meta.textContent = metaText
+
+        summary.append(label, meta)
+        details.append(summary, body)
+
+        return { details, meta }
+    }
+
+    private scrollChatToBottom (force = false): void {
+        if (!force && !this.chatAutoScroll) {
+            return
+        }
+        this.chatViewport.scrollTop = this.chatViewport.scrollHeight
+        this.chatAutoScroll = true
+    }
+
+    private isChatScrolledToBottom (): boolean {
+        const distanceFromBottom = this.chatViewport.scrollHeight - this.chatViewport.scrollTop - this.chatViewport.clientHeight
+        return distanceFromBottom < 16
+    }
+
+    private clearLatestSessionOutput (): void {
+        this.recentOutputLines = []
+        this.pendingOutput = ''
+        this.currentInputLine = ''
+        this.skipNextEmptyInputOutputLine = false
+        this.output.value = ''
+        this.latestOutputDetails.open = false
+        this.render()
+    }
+
+    private updateLatestOutputFromEditor (): void {
+        this.recentOutputLines = this.output.value ? this.output.value.split(/\r?\n/) : []
+        this.pendingOutput = ''
+        this.currentInputLine = ''
+        this.skipNextEmptyInputOutputLine = false
+        this.trimRecentOutput()
+        this.latestOutputMeta.textContent = this.formatLineCount(this.recentOutputLines.length)
+    }
+
+    private requestTerminalRefit (): void {
+        setTimeout(() => this.tab.configure())
+        setTimeout(() => this.tab.configure(), 80)
+    }
+
+    private scrollLatestOutputToBottom (): void {
+        requestAnimationFrame(() => {
+            this.output.scrollTop = this.output.scrollHeight
+        })
+    }
+
+    private isLatestOutputScrolledToBottom (): boolean {
+        const distanceFromBottom = this.output.scrollHeight - this.output.scrollTop - this.output.clientHeight
+        return distanceFromBottom < 16
+    }
+
+    private guardTerminalEvents (element: HTMLElement): void {
+        element.tabIndex = -1
+        const stopPropagation = (event: Event) => event.stopPropagation()
+        element.addEventListener('mousedown', event => {
+            this.focusEventSurface(element, event)
+            event.stopPropagation()
+        })
+        for (const eventName of ['click', 'mouseup', 'dblclick', 'contextmenu']) {
+            element.addEventListener(eventName, stopPropagation)
+        }
+        for (const eventName of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'copy', 'cut', 'paste']) {
+            element.addEventListener(eventName, stopPropagation)
+        }
+        element.addEventListener('wheel', stopPropagation, { passive: true })
+        element.addEventListener('touchmove', stopPropagation, { passive: true })
+    }
+
+    private focusEventSurface (surface: HTMLElement, event: MouseEvent): void {
+        const target = event.target
+        if (!(target instanceof HTMLElement)) {
+            return
+        }
+        if (target.closest('textarea, input, select, button, a, [contenteditable="true"]')) {
+            return
+        }
+        surface.focus({ preventScroll: true })
+    }
+
     private textarea (placeholder: string, rows: number): HTMLTextAreaElement {
         const element = document.createElement('textarea')
         element.className = 'form-control'
@@ -541,6 +751,17 @@ export class AITerminalPanel {
 
     private getRecentOutputText (): string {
         return this.recentOutputLines.join('\n')
+    }
+
+    private countOutputLines (output: string): number {
+        return output ? output.split(/\r?\n/).length : 0
+    }
+
+    private formatLineCount (lineCount: number): string {
+        if (lineCount === 0) {
+            return 'empty'
+        }
+        return lineCount === 1 ? '1 line' : `${lineCount} lines`
     }
 
     private getDisplayOutputLines (): string[] {

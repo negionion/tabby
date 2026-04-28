@@ -28,6 +28,7 @@ export class AITerminalService {
         const panel = new AITerminalPanel(tab, this.providerAuth, this.providerRunner, this.config)
         this.panels.set(tab, panel)
         tab.element.nativeElement.appendChild(panel.element)
+        tab.element.nativeElement.appendChild(panel.senderElement)
     }
 
     detachFromTerminal (tab: BaseTerminalTabComponent<any>): void {
