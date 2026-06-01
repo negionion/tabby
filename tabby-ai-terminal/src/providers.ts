@@ -1,6 +1,6 @@
 export type AIProviderID = 'codex'
 
-export type AIProviderState = 'checking'|'logged-in'|'logged-out'|'not-installed'|'error'
+export type AIProviderState = 'checking'|'logged-in'|'logged-out'|'not-installed'|'restart-required'|'error'
 
 export interface AIProviderStatus {
     provider: AIProviderID

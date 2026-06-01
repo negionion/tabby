@@ -58,6 +58,7 @@ export class AITerminalPanel {
     private referenceFolder: string|null = null
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
+    private environmentRefreshPromptShown = false
     private statusSubscription: Subscription
     private runHandle: AIProviderRunHandle|null = null
     private modelRefreshPromise: Promise<void>|null = null
@@ -461,6 +462,7 @@ export class AITerminalPanel {
         })
         const status = await this.providerAuth.checkSelectedProviderStatus()
         this.applyProviderStatus(status)
+        await this.maybePromptForEnvironmentRefresh(status)
         return status
     }
 
@@ -471,7 +473,9 @@ export class AITerminalPanel {
             label: 'Checking provider status...',
         })
         this.refreshModelOptions()
-        this.applyProviderStatus(await this.providerAuth.setSelectedProvider(provider))
+        const status = await this.providerAuth.setSelectedProvider(provider)
+        this.applyProviderStatus(status)
+        await this.maybePromptForEnvironmentRefresh(status)
     }
 
     private async login (): Promise<void> {
@@ -479,8 +483,22 @@ export class AITerminalPanel {
         if (status.state === 'logged-in') {
             return
         }
-        this.pendingLoginRefreshes = 3
-        await this.providerAuth.startLogin(this.providerSelect.value as AIProviderID)
+        if (status.state === 'restart-required') {
+            await this.maybePromptForEnvironmentRefresh(status, true)
+            return
+        }
+        this.pendingLoginRefreshes = 30
+        try {
+            await this.providerAuth.startLogin(this.providerSelect.value as AIProviderID)
+        } catch (error) {
+            this.pendingLoginRefreshes = 0
+            this.applyProviderStatus({
+                provider: this.providerSelect.value as AIProviderID,
+                state: 'error',
+                label: 'Could not start provider login',
+                detail: error instanceof Error ? error.message : `${error}`,
+            })
+        }
     }
 
     private async logout (): Promise<void> {
@@ -518,12 +536,44 @@ export class AITerminalPanel {
         this.headerLogoutButton.hidden = !signedIn
         this.referenceFolderRow.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
+        this.loginOnlyLoginButton.textContent = this.getLoginButtonLabel(status)
         this.signedIn = signedIn
+        if (status.state !== 'restart-required') {
+            this.environmentRefreshPromptShown = false
+        }
         if (signedIn) {
             this.pendingLoginRefreshes = 0
         }
         this.renderProviderIdentity()
         this.render()
+    }
+
+    private getLoginButtonLabel (status: AIProviderStatus): string {
+        const provider = AI_PROVIDERS.find(item => item.id === status.provider)
+        const providerLabel = provider?.label ?? status.provider
+        if (status.state === 'not-installed') {
+            return `Install ${providerLabel}`
+        }
+        if (status.state === 'error') {
+            return `Retry ${providerLabel} setup`
+        }
+        if (status.state === 'restart-required') {
+            return 'Close Tabby to finish setup'
+        }
+        return `Sign in with ${providerLabel}`
+    }
+
+    private async maybePromptForEnvironmentRefresh (status: AIProviderStatus, force = false): Promise<void> {
+        if (status.state !== 'restart-required') {
+            return
+        }
+        if (this.environmentRefreshPromptShown && !force) {
+            return
+        }
+
+        this.environmentRefreshPromptShown = true
+        this.pendingLoginRefreshes = 0
+        await this.providerAuth.confirmCloseForEnvironmentRefresh(status.provider)
     }
 
     private renderProviderIdentity (): void {
