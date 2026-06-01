@@ -151,7 +151,7 @@ export class AIProviderAuthService {
                     provider: provider.id,
                     state: 'not-installed',
                     label: `${provider.label} CLI is not installed`,
-                    detail: message,
+                    detail: `Click Install / Login to install ${provider.label} CLI and start login.`,
                 }
             }
             return {
@@ -254,7 +254,7 @@ export class AIProviderAuthService {
 
     private async openExternalTerminal (command: string): Promise<void> {
         if (process.platform === 'win32') {
-            await this.spawnDetached('cmd.exe', ['/c', 'start', 'AI Terminal Login', 'cmd.exe', '/k', command])
+            await this.spawnDetached('cmd.exe', ['/c', 'start', 'AI Terminal Login', 'cmd.exe', '/k', this.withWindowsUTF8CodePage(command)])
             return
         }
         if (process.platform === 'darwin') {
@@ -275,11 +275,15 @@ export class AIProviderAuthService {
     private buildProviderSetupCommand (command: string): string {
         if (command === 'codex') {
             if (process.platform === 'win32') {
-                return 'where codex >nul 2>nul || npm install -g @openai/codex & codex login'
+                return '(where codex >nul 2>nul || powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex") && codex login'
             }
-            return 'command -v codex >/dev/null 2>&1 || npm install -g @openai/codex; codex login'
+            return '(command -v codex >/dev/null 2>&1 || curl -fsSL https://chatgpt.com/codex/install.sh | sh) && codex login'
         }
         return `${command} login`
+    }
+
+    private withWindowsUTF8CodePage (command: string): string {
+        return `chcp 65001 >nul && ${command}`
     }
 
     private getLinuxTerminalCandidates (command: string): { command: string, args: string[] }[] {

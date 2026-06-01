@@ -8,12 +8,13 @@
   "main": "dist/index.js",
   "typings": "typings/index.d.ts",
   "scripts": {
-    "build": "webpack --progress --color",
-    "package": "sh build.sh",
-    "watch": "webpack --progress --color --watch"
+    "build:typings": "node ../node_modules/typescript/bin/tsc --project tsconfig.typings.json",
+    "build": "node ../node_modules/webpack/bin/webpack.js --config webpack.config.mjs",
+    "prepack": "yarn run build:typings && yarn run build",
+    "watch": "node ../node_modules/webpack/bin/webpack.js --config webpack.config.mjs --watch"
   },
   "files": [
-    "dist",
+    "dist/index.js",
     "typings"
   ],
   "author": "Tabby Developers",

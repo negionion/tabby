@@ -21,8 +21,8 @@ export class AITerminalConfigProvider extends ConfigProvider {
             provider: 'codex',
             model: 'auto',
             systemPrompt: DEFAULT_AI_TERMINAL_SYSTEM_PROMPT,
-            maxSessionOutputLines: 100,
-            fontSize: 12,
+            maxSessionOutputLines: 1000,
+            fontSize: 14,
             ignoreEmptyEnterPrompts: true,
         },
         hotkeys: {
