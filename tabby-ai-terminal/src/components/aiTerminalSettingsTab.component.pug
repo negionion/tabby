@@ -44,5 +44,16 @@ h3.mb-3(translate) AI terminal
         (ngModelChange)='config.save()',
     )
 
+.form-line
+    .header
+        .title(translate) Saved sender command mode
+        .description(translate) Choose how saved sender command tabs insert text into the sender draft.
+    select.form-control(
+        [(ngModel)]='config.store.aiTerminal.senderCommandInsertMode',
+        (ngModelChange)='config.save()',
+    )
+        option(value='replace', translate) Replace sender draft
+        option(value='append', translate) Append to sender draft
+
 .alert.alert-info
     span(translate) This limit applies to the terminal output stored for the AI panel and used when you click Analyze.

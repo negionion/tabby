@@ -57,6 +57,92 @@ export const AI_TERMINAL_PANEL_STYLES = `
     min-height: 0;
     margin-bottom: 0;
 }
+.ai-sender-heading {
+    flex: 0 0 auto;
+    min-width: 0;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+}
+.ai-saved-command-toolbar {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+}
+.ai-saved-command-tabs {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(760px, 70%);
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    justify-content: flex-end;
+}
+.ai-saved-command-tab,
+.ai-saved-command-control {
+    flex: 0 0 auto;
+    min-width: 0;
+    height: 28px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+    color: #d7e7f5;
+    font-size: var(--ai-terminal-font-size);
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+.ai-saved-command-tab {
+    max-width: 10ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ai-saved-command-tab:hover,
+.ai-saved-command-control:hover {
+    background: rgba(143, 211, 255, 0.16);
+    border-color: rgba(143, 211, 255, 0.36);
+}
+.ai-saved-command-control.is-remove:hover,
+.ai-saved-command-control.is-add:hover {
+    background: transparent;
+}
+.ai-saved-command-tab.is-active {
+    color: #0b141d;
+    background: #8fd3ff;
+    border-color: #8fd3ff;
+}
+.ai-saved-command-control {
+    width: 32px;
+    padding: 0;
+    font-weight: 700;
+    background: transparent;
+}
+.ai-saved-command-control.is-remove {
+    color: #ff8d8d;
+    border-color: rgba(255, 96, 96, 0.75);
+}
+.ai-saved-command-control.is-add {
+    color: #8cff75;
+    border-color: rgba(124, 255, 96, 0.78);
+}
+.ai-saved-command-control.is-remove:hover {
+    background: rgba(255, 96, 96, 0.12);
+    border-color: #ff6060;
+}
+.ai-saved-command-control.is-add:hover {
+    background: rgba(124, 255, 96, 0.12);
+    border-color: #7cff60;
+}
 .ai-terminal-sender textarea {
     flex: 1;
     min-height: 0;

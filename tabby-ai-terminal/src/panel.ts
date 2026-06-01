@@ -8,6 +8,12 @@ import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
 const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
+const MAX_SAVED_SENDER_COMMANDS = 10
+
+interface SavedSenderCommand {
+    label: string
+    command: string
+}
 
 export class AITerminalPanel {
     readonly element: HTMLElement
@@ -43,6 +49,7 @@ export class AITerminalPanel {
     private latestOutputMeta: HTMLElement
     private output: HTMLTextAreaElement
     private currentAnalysis: HTMLPreElement|null = null
+    private savedCommandTabs: HTMLElement
     private draft: HTMLTextAreaElement
     private recentOutputLines: string[] = []
     private pendingOutput = ''
@@ -59,7 +66,9 @@ export class AITerminalPanel {
     private lastProviderStatus: AIProviderStatus|null = null
     private lastFocusRefreshAt = 0
     private environmentRefreshPromptShown = false
+    private selectedSavedCommandIndex = -1
     private statusSubscription: Subscription
+    private configSubscription: Subscription|null = null
     private runHandle: AIProviderRunHandle|null = null
     private modelRefreshPromise: Promise<void>|null = null
     private layoutObserver: ResizeObserver|null = null
@@ -188,7 +197,11 @@ export class AITerminalPanel {
         this.chatStack.append(this.chatViewport, this.latestOutputDetails)
         this.chatBody.append(this.chatStack, this.question)
 
+        this.savedCommandTabs = document.createElement('div')
+        this.savedCommandTabs.className = 'ai-saved-command-tabs'
         this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
+        this.renderSavedCommandTabs()
+        this.configSubscription = this.config.changed$.subscribe(() => this.renderSavedCommandTabs())
 
         this.headerControls.append(
             this.providerSelect,
@@ -211,7 +224,7 @@ export class AITerminalPanel {
         this.content.append(chatSection)
 
         this.senderElement.append(
-            this.section('Sender / Command Draft', this.draft, [
+            this.senderSection('Sender / Command Draft', this.draft, [
                 this.button('Clear', 'secondary', () => {
                     this.draft.value = ''
                 }),
@@ -238,6 +251,7 @@ export class AITerminalPanel {
             this.layoutFrame = null
         }
         this.statusSubscription.unsubscribe()
+        this.configSubscription?.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
         this.tab.element.nativeElement.classList.remove('ai-terminal-sender-visible')
@@ -685,6 +699,133 @@ export class AITerminalPanel {
             this.tab.sendInput(`${line}\r`)
         }
         this.draft.value = ''
+    }
+
+    private createSavedCommandToolbar (): HTMLElement {
+        const toolbar = document.createElement('div')
+        toolbar.className = 'ai-saved-command-toolbar'
+
+        const removeButton = this.button('－', 'secondary', () => this.removeSelectedSenderCommand())
+        removeButton.classList.add('ai-saved-command-control', 'is-remove')
+        removeButton.title = 'Remove selected saved command'
+
+        const addButton = this.button('＋', 'secondary', () => this.saveCurrentSenderCommand())
+        addButton.classList.add('ai-saved-command-control', 'is-add')
+        addButton.title = 'Save current sender command'
+
+        toolbar.append(this.savedCommandTabs, removeButton, addButton)
+        return toolbar
+    }
+
+    private insertSavedCommandIntoDraft (command: string, index: number): void {
+        this.selectedSavedCommandIndex = index
+        if (this.getSenderCommandInsertMode() === 'append') {
+            const current = this.draft.value.trimEnd()
+            this.draft.value = current ? `${current}\n${command}` : command
+        } else {
+            this.draft.value = command
+        }
+        this.renderSavedCommandTabs()
+        this.draft.focus()
+    }
+
+    private async saveCurrentSenderCommand (): Promise<void> {
+        const command = this.draft.value.trim()
+        if (!command) {
+            return
+        }
+
+        const savedCommands = this.getSavedSenderCommands()
+        if (savedCommands.length >= MAX_SAVED_SENDER_COMMANDS) {
+            savedCommands.splice(0, savedCommands.length - MAX_SAVED_SENDER_COMMANDS + 1)
+        }
+        savedCommands.push({
+            label: this.buildSavedCommandLabel(command),
+            command,
+        })
+        this.selectedSavedCommandIndex = savedCommands.length - 1
+        await this.setSavedSenderCommands(savedCommands)
+    }
+
+    private async removeSelectedSenderCommand (): Promise<void> {
+        const savedCommands = this.getSavedSenderCommands()
+        if (!savedCommands.length) {
+            return
+        }
+
+        const index = this.selectedSavedCommandIndex >= 0 ? this.selectedSavedCommandIndex : savedCommands.length - 1
+        savedCommands.splice(index, 1)
+        this.selectedSavedCommandIndex = Math.min(index, savedCommands.length - 1)
+        await this.setSavedSenderCommands(savedCommands)
+    }
+
+    private async setSavedSenderCommands (commands: SavedSenderCommand[]): Promise<void> {
+        this.config.store.aiTerminal.savedSenderCommands = commands
+        await this.config.save()
+        this.renderSavedCommandTabs()
+    }
+
+    private getSavedSenderCommands (): SavedSenderCommand[] {
+        const savedCommands = this.config.store.aiTerminal.savedSenderCommands
+        if (!Array.isArray(savedCommands)) {
+            return []
+        }
+
+        return savedCommands
+            .filter((item: any) => item && typeof item.command === 'string' && item.command.trim())
+            .map((item: any) => ({
+                label: typeof item.label === 'string' && item.label.trim() ? item.label.trim() : this.buildSavedCommandLabel(item.command),
+                command: item.command.trim(),
+            }))
+            .slice(-MAX_SAVED_SENDER_COMMANDS)
+    }
+
+    private renderSavedCommandTabs (): void {
+        const savedCommands = this.getSavedSenderCommands()
+        this.savedCommandTabs.replaceChildren()
+        savedCommands.forEach((item, index) => {
+            const tab = document.createElement('button')
+            tab.type = 'button'
+            tab.className = 'ai-saved-command-tab'
+            tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
+            tab.textContent = item.label
+            tab.title = item.command
+            tab.addEventListener('click', () => this.insertSavedCommandIntoDraft(item.command, index))
+            this.savedCommandTabs.appendChild(tab)
+        })
+    }
+
+    private buildSavedCommandLabel (command: string): string {
+        const firstLine = command.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? 'Command'
+        return firstLine.length > 7 ? `${firstLine.slice(0, 7)}...` : firstLine
+    }
+
+    private getSenderCommandInsertMode (): 'replace'|'append' {
+        return this.config.store.aiTerminal.senderCommandInsertMode === 'append' ? 'append' : 'replace'
+    }
+
+    private senderSection (title: string, body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
+        const section = document.createElement('div')
+        section.className = 'ai-panel-section ai-sender-section'
+
+        const heading = document.createElement('div')
+        heading.className = 'ai-sender-heading'
+
+        const titleElement = document.createElement('div')
+        titleElement.className = 'ai-panel-title'
+        titleElement.textContent = title
+
+        heading.append(titleElement, this.createSavedCommandToolbar())
+        section.append(heading, body)
+
+        if (buttons.length) {
+            const actions = document.createElement('div')
+            actions.className = 'ai-panel-actions'
+            actions.append(...buttons)
+            section.appendChild(actions)
+        }
+
+        return section
     }
 
     private section (title: string, body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {

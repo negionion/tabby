@@ -24,6 +24,8 @@ export class AITerminalConfigProvider extends ConfigProvider {
             maxSessionOutputLines: 1000,
             fontSize: 14,
             ignoreEmptyEnterPrompts: true,
+            senderCommandInsertMode: 'replace',
+            savedSenderCommands: [],
         },
         hotkeys: {
             'toggle-ai-terminal-panel': [],
