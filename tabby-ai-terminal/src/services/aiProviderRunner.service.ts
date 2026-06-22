@@ -7,6 +7,7 @@ import * as path from 'path'
 import { AIProviderAuthService } from './aiProviderAuth.service'
 import { AIProviderID, getAIProvider } from '../providers'
 import { DEFAULT_AI_TERMINAL_SYSTEM_PROMPT } from '../config'
+import { stripTerminalControlSequences, TerminalOutputSanitizer } from '../terminalOutputSanitizer'
 
 export interface AIProviderRunRequest {
     provider: AIProviderID
@@ -50,9 +51,11 @@ export class AIProviderRunnerService {
         let stderr = ''
         let detectedSessionID = request.sessionID
         let outputForSessionID = ''
+        const stdoutSanitizer = new TerminalOutputSanitizer()
+        const stderrSanitizer = new TerminalOutputSanitizer()
         const startedAt = Date.now()
         child.stdout.on('data', data => {
-            const chunk = this.stripAnsi(data.toString())
+            const chunk = stdoutSanitizer.write(data.toString())
             if (!detectedSessionID) {
                 outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
                 detectedSessionID = this.extractSessionID(outputForSessionID)
@@ -63,7 +66,7 @@ export class AIProviderRunnerService {
             handlers.output(chunk)
         })
         child.stderr.on('data', data => {
-            const chunk = this.stripAnsi(data.toString())
+            const chunk = stderrSanitizer.write(data.toString())
             stderr = `${stderr}${chunk}`
             if (!detectedSessionID) {
                 outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
@@ -208,6 +211,7 @@ export class AIProviderRunnerService {
 
     private buildPrompt (request: AIProviderRunRequest, referenceFolder: ReferenceFolderPaths|null): string {
         const systemPrompt = this.config.store.aiTerminal.systemPrompt?.trim() || DEFAULT_AI_TERMINAL_SYSTEM_PROMPT
+        const terminalOutput = stripTerminalControlSequences(request.terminalOutput).trim()
         return [
             '<system_instructions>',
             systemPrompt,
@@ -218,7 +222,7 @@ export class AIProviderRunnerService {
             '</user_request>',
             '',
             '<terminal_output>',
-            this.escapePromptContent(request.terminalOutput.trim() || 'No recent terminal output captured.'),
+            this.escapePromptContent(terminalOutput || 'No recent terminal output captured.'),
             '</terminal_output>',
             '',
             '<reference_folder>',
@@ -235,9 +239,4 @@ export class AIProviderRunnerService {
             .replace(/>/g, '&gt;')
     }
 
-    private stripAnsi (input: string): string {
-        return input
-            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-            .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
-    }
 }

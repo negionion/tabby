@@ -4,6 +4,7 @@ import { ConfigService, PlatformService } from 'tabby-core'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
 import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
+import { stripTerminalControlSequences, TerminalOutputSanitizer } from './terminalOutputSanitizer'
 
 const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
@@ -53,6 +54,7 @@ export class AITerminalPanel {
     private draft: HTMLTextAreaElement
     private recentOutputLines: string[] = []
     private pendingOutput = ''
+    private outputSanitizer = new TerminalOutputSanitizer()
     private currentInputLine = ''
     private skipNextEmptyInputOutputLine = false
     private visible = false
@@ -260,7 +262,7 @@ export class AITerminalPanel {
     }
 
     appendOutput (data: string): void {
-        const normalized = this.stripAnsi(data).replace(/\r\n?/g, '\n')
+        const normalized = this.outputSanitizer.write(data).replace(/\r\n?/g, '\n')
         if (!normalized) {
             return
         }
@@ -1098,12 +1100,6 @@ export class AITerminalPanel {
         return indicator
     }
 
-    private stripAnsi (input: string): string {
-        return input
-            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-            .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
-    }
-
     private trimRecentOutput (): void {
         const limit = this.getSessionOutputLimit()
         if (this.recentOutputLines.length > limit) {
@@ -1227,7 +1223,7 @@ export class AITerminalPanel {
     }
 
     private normalizeOutputLine (line: string): string {
-        return this.stripAnsi(line).replace(/\s+$/g, '')
+        return stripTerminalControlSequences(line).replace(/\s+$/g, '')
     }
 
     private skipEscapeSequence (text: string, startIndex: number): number {
