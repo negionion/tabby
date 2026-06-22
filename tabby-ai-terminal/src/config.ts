@@ -20,6 +20,7 @@ export class AITerminalConfigProvider extends ConfigProvider {
         aiTerminal: {
             provider: 'codex',
             model: 'auto',
+            providerModels: {},
             systemPrompt: DEFAULT_AI_TERMINAL_SYSTEM_PROMPT,
             maxSessionOutputLines: 1000,
             fontSize: 14,

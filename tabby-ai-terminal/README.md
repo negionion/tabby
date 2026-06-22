@@ -1,12 +1,12 @@
 # Tabby AI Terminal
 
-`tabby-ai-terminal` is a built-in Tabby plugin that adds an AI-assisted panel to terminal tabs. It captures recent terminal output, removes terminal control sequences, and sends the cleaned context and the user's question to the Codex CLI. The panel also supports continued Codex sessions, configurable models and prompts, a local reference folder, and a command draft area.
+`tabby-ai-terminal` is a built-in Tabby plugin that adds an AI-assisted panel to terminal tabs. It captures recent terminal output, removes terminal control sequences, and sends the cleaned context and the user's question to either the Codex CLI or Claude Code CLI. The panel also supports continued provider sessions, configurable models and prompts, a local reference folder, and a command draft area.
 
 ## Requirements
 
 - The Tabby monorepo dependencies must be installed in the repository root. The build scripts use `../node_modules`.
 - Node.js and Yarn must be available.
-- The Codex CLI must be installed and authenticated to use the plugin at runtime.
+- At least one supported provider CLI must be installed and authenticated at runtime: Codex or Claude Code.
 - `tar` must be available if you want `pack:plugin` to create a ZIP archive. The unpacked export folder is still produced when ZIP creation is unavailable.
 
 ## Build
@@ -56,6 +56,14 @@ For development, rebuild the JavaScript bundle whenever a source file changes:
 yarn run watch
 ```
 
+## AI providers
+
+Use the provider selector in the panel header to switch between Codex and Claude Code. Each provider keeps its own model selection, while switching providers starts a fresh chat session so session IDs are never shared across CLIs.
+
+If a selected CLI is missing, the panel opens an external terminal and runs that provider's official native installer. Claude Code uses Anthropic's [Windows PowerShell installer](https://claude.ai/install.ps1) on Windows and [shell installer](https://claude.ai/install.sh) on macOS and Linux. The plugin also checks the native install location (`~/.local/bin`) because the installer may not add it to Windows PATH. After installation, return to Tabby and refresh, then use the same panel button to sign in. Login, status checks, and logout are handled by `claude auth login`, `claude auth status`, and `claude auth logout`.
+
+Claude Code runs in non-interactive, read-only Plan mode with only its Read, Glob, and Grep tools enabled. Its sessions can be resumed in the same way as Codex sessions from the panel.
+
 ## Project Structure
 
 ### Root files and directories
@@ -95,7 +103,7 @@ yarn run watch
 | --- | --- |
 | `src/services/aiTerminal.service.ts` | Coordinates one AI panel per terminal tab and manages panel attachment, visibility, and captured I/O. |
 | `src/services/aiProviderAuth.service.ts` | Finds the provider CLI, checks authentication, starts login/logout flows, and discovers available models. |
-| `src/services/aiProviderRunner.service.ts` | Builds prompts, starts or resumes Codex CLI sessions, streams responses, and resolves optional reference folders. |
+| `src/services/aiProviderRunner.service.ts` | Builds prompts, starts or resumes Codex and Claude Code CLI sessions, streams responses, and resolves optional reference folders. |
 
 ## Build Outputs
 

@@ -1,4 +1,4 @@
-export type AIProviderID = 'codex'
+export type AIProviderID = 'codex'|'claude'
 
 export type AIProviderState = 'checking'|'logged-in'|'logged-out'|'not-installed'|'restart-required'|'error'
 
@@ -24,6 +24,13 @@ export const AI_PROVIDERS: AIProviderDefinition[] = [
         label: 'Codex',
         command: 'codex',
         models: ['auto', 'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.4', 'gpt-5.4-mini'],
+        defaultModel: 'auto',
+    },
+    {
+        id: 'claude',
+        label: 'Claude Code',
+        command: 'claude',
+        models: ['auto', 'sonnet', 'opus', 'haiku'],
         defaultModel: 'auto',
     },
 ]

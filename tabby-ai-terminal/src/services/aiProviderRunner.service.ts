@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core'
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process'
+import { randomBytes } from 'crypto'
 import { ConfigService } from 'tabby-core'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -41,20 +42,34 @@ export class AIProviderRunnerService {
 
     run (request: AIProviderRunRequest, handlers: AIProviderRunHandlers): AIProviderRunHandle {
         const provider = getAIProvider(request.provider)
-        if (provider.id !== 'codex') {
-            throw new Error(`${provider.label} is not supported yet`)
-        }
-
         const referenceFolder = this.resolveReferenceFolder(request.referenceFolder)
         const prompt = this.buildPrompt(request, referenceFolder)
-        const child = this.spawnCodex(request, referenceFolder)
+        const claudeSessionID = provider.id === 'claude' ? request.sessionID ?? this.createSessionID() : null
+        const child = provider.id === 'claude'
+            ? this.spawnClaude(request, claudeSessionID!, referenceFolder)
+            : this.spawnCodex(request, referenceFolder)
         let stderr = ''
         let detectedSessionID = request.sessionID
         let outputForSessionID = ''
+        let claudeOutputBuffer = ''
+        let claudeProducedText = false
         const stdoutSanitizer = new TerminalOutputSanitizer()
         const stderrSanitizer = new TerminalOutputSanitizer()
         const startedAt = Date.now()
         child.stdout.on('data', data => {
+            if (provider.id === 'claude') {
+                if (!detectedSessionID && claudeSessionID) {
+                    detectedSessionID = claudeSessionID
+                    handlers.session(claudeSessionID)
+                }
+                claudeOutputBuffer += data.toString()
+                const lines = claudeOutputBuffer.split(/\r?\n/)
+                claudeOutputBuffer = lines.pop() ?? ''
+                for (const line of lines) {
+                    claudeProducedText = this.handleClaudeOutputLine(line, handlers, claudeProducedText)
+                }
+                return
+            }
             const chunk = stdoutSanitizer.write(data.toString())
             if (!detectedSessionID) {
                 outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
@@ -78,7 +93,10 @@ export class AIProviderRunnerService {
         })
         child.once('error', error => handlers.error(`${error.message}\n`))
         child.once('close', code => {
-            const sessionID = detectedSessionID ?? this.findRecentCodexSessionID(startedAt)
+            if (provider.id === 'claude' && claudeOutputBuffer.trim()) {
+                claudeProducedText = this.handleClaudeOutputLine(claudeOutputBuffer, handlers, claudeProducedText)
+            }
+            const sessionID = detectedSessionID ?? (provider.id === 'codex' ? this.findRecentCodexSessionID(startedAt) : null)
             if (sessionID && sessionID !== detectedSessionID) {
                 handlers.session(sessionID)
             }
@@ -97,6 +115,78 @@ export class AIProviderRunnerService {
                 }
             },
         }
+    }
+
+    private spawnClaude (
+        request: AIProviderRunRequest,
+        sessionID: string,
+        referenceFolder: ReferenceFolderPaths|null,
+    ): ChildProcessWithoutNullStreams {
+        const args = [
+            '--print',
+            '--verbose',
+            '--output-format',
+            'stream-json',
+            '--permission-mode',
+            'plan',
+            '--tools',
+            'Read,Glob,Grep',
+        ]
+        if (request.sessionID) {
+            args.push('--resume', sessionID)
+        } else {
+            args.push('--session-id', sessionID)
+        }
+        const model = this.providerAuth.getSelectedModel()
+        if (model !== 'auto') {
+            args.push('--model', model)
+        }
+
+        const invocation = this.providerAuth.buildProviderCommandInvocation('claude', args)
+        return spawn(invocation.command, invocation.args, { env: invocation.env, cwd: referenceFolder?.nativePath })
+    }
+
+    private handleClaudeOutputLine (
+        line: string,
+        handlers: AIProviderRunHandlers,
+        producedText: boolean,
+    ): boolean {
+        const trimmed = line.trim()
+        if (!trimmed) {
+            return producedText
+        }
+
+        let event: any = null
+        try {
+            event = JSON.parse(trimmed)
+        } catch {
+            handlers.output(`${stripTerminalControlSequences(line)}\n`)
+            return true
+        }
+
+        if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+            const text = event.message.content
+                .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+                .map((block: any) => block.text)
+                .join('')
+            if (text) {
+                handlers.output(text)
+                return true
+            }
+        }
+        if (event.type === 'result' && !producedText && typeof event.result === 'string') {
+            handlers.output(event.result)
+            return true
+        }
+        return producedText
+    }
+
+    private createSessionID (): string {
+        const bytes = randomBytes(16)
+        bytes[6] = bytes[6] & 0x0f | 0x40
+        bytes[8] = bytes[8] & 0x3f | 0x80
+        const hex = bytes.toString('hex')
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
     }
 
     private spawnCodex (request: AIProviderRunRequest, referenceFolder: ReferenceFolderPaths|null): ChildProcessWithoutNullStreams {

@@ -73,6 +73,7 @@ export class AITerminalPanel {
     private statusSubscription: Subscription
     private configSubscription: Subscription|null = null
     private runHandle: AIProviderRunHandle|null = null
+    private runGeneration = 0
     private modelRefreshPromise: Promise<void>|null = null
     private layoutObserver: ResizeObserver|null = null
     private layoutFrame: number|null = null
@@ -336,23 +337,41 @@ export class AITerminalPanel {
         this.clearLatestSessionOutput()
         this.draft.value = ''
         this.setRunning(true)
+        const provider = this.providerAuth.getSelectedProvider()
+        const runGeneration = ++this.runGeneration
 
         try {
             this.runHandle = this.providerRunner.run(
                 {
-                    provider: this.providerAuth.getSelectedProvider(),
+                    provider,
                     sessionID: this.aiSessionID,
                     referenceFolder: this.referenceFolder,
                     question,
                     terminalOutput,
                 },
                 {
-                    session: sessionID => this.setAISessionID(sessionID),
-                    output: chunk => this.appendAnalysis(chunk),
-                    error: chunk => this.appendAnalysis(chunk),
+                    session: sessionID => {
+                        if (runGeneration === this.runGeneration && provider === this.providerAuth.getSelectedProvider()) {
+                            this.setAISessionID(sessionID)
+                        }
+                    },
+                    output: chunk => {
+                        if (runGeneration === this.runGeneration) {
+                            this.appendAnalysis(chunk)
+                        }
+                    },
+                    error: chunk => {
+                        if (runGeneration === this.runGeneration) {
+                            this.appendAnalysis(chunk)
+                        }
+                    },
                     done: code => {
+                        if (runGeneration !== this.runGeneration) {
+                            return
+                        }
                         if (code && code !== 0) {
-                            this.appendAnalysis(`\nCodex exited with code ${code}.\n`)
+                            const definition = AI_PROVIDERS.find(item => item.id === provider)
+                            this.appendAnalysis(`\n${definition?.label ?? 'AI provider'} exited with code ${code}.\n`)
                         }
                         this.runHandle = null
                         this.setRunning(false)
@@ -371,6 +390,7 @@ export class AITerminalPanel {
     }
 
     private cancelAnalyze (): void {
+        this.runGeneration++
         this.runHandle?.cancel()
         this.runHandle = null
         this.setRunning(false)
@@ -493,13 +513,13 @@ export class AITerminalPanel {
     }
 
     private async setProvider (provider: AIProviderID): Promise<void> {
+        const statusPromise = this.providerAuth.setSelectedProvider(provider)
         this.applyProviderStatus({
             provider,
             state: 'checking',
             label: 'Checking provider status...',
         })
-        this.refreshModelOptions()
-        const status = await this.providerAuth.setSelectedProvider(provider)
+        const status = await statusPromise
         this.applyProviderStatus(status)
         await this.maybePromptForEnvironmentRefresh(status)
     }
@@ -548,6 +568,13 @@ export class AITerminalPanel {
     }
 
     private applyProviderStatus (status: AIProviderStatus): void {
+        if (status.provider !== this.providerAuth.getSelectedProvider()) {
+            return
+        }
+        if (this.lastProviderStatus && this.lastProviderStatus.provider !== status.provider) {
+            this.cancelAnalyze()
+            this.resetAIChatSession()
+        }
         this.lastProviderStatus = status
         this.providerSelect.value = status.provider
         this.refreshModelOptions()
@@ -556,7 +583,7 @@ export class AITerminalPanel {
         this.loginOnly.hidden = signedIn
         this.content.hidden = !signedIn
         this.signedInIdentity.hidden = !signedIn
-        this.providerSelect.hidden = signedIn
+        this.providerSelect.hidden = false
         this.modelSelect.hidden = !signedIn
         this.resetSessionButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn

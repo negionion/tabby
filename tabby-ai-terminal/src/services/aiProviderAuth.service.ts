@@ -22,20 +22,29 @@ export class AIProviderAuthService {
     }
 
     async setSelectedProvider (provider: AIProviderID): Promise<AIProviderStatus> {
+        const currentProvider = this.getSelectedProvider()
+        const providerModels = this.getProviderModels()
+        providerModels[currentProvider] = this.config.store.aiTerminal.model ?? getAIProvider(currentProvider).defaultModel
         this.config.store.aiTerminal.provider = provider
+        this.config.store.aiTerminal.model = providerModels[provider] ?? getAIProvider(provider).defaultModel
+        this.config.store.aiTerminal.providerModels = providerModels
         await this.config.save()
         return this.checkProviderStatus(provider)
     }
 
     getSelectedModel (): string {
         const provider = getAIProvider(this.config.store.aiTerminal.provider)
-        const model = this.config.store.aiTerminal.model
-        return model || provider.defaultModel
+        const model = this.getProviderModels()[provider.id] ?? this.config.store.aiTerminal.model
+        return model ?? provider.defaultModel
     }
 
     async setSelectedModel (model: string): Promise<void> {
         const provider = getAIProvider(this.config.store.aiTerminal.provider)
-        this.config.store.aiTerminal.model = model.trim() || provider.defaultModel
+        const selectedModel = model.trim() || provider.defaultModel
+        const providerModels = this.getProviderModels()
+        providerModels[provider.id] = selectedModel
+        this.config.store.aiTerminal.model = selectedModel
+        this.config.store.aiTerminal.providerModels = providerModels
         await this.config.save()
     }
 
@@ -124,7 +133,10 @@ export class AIProviderAuthService {
             return false
         }
         const executable = await this.resolveProviderExecutable(provider.command)
-        await this.openExternalTerminal(this.commandLine([executable ?? provider.command, 'logout']))
+        await this.openExternalTerminal(this.commandLine([
+            this.getExternalTerminalExecutable(provider.command, executable),
+            ...this.getLogoutArgs(providerID),
+        ]))
         return true
     }
 
@@ -132,7 +144,7 @@ export class AIProviderAuthService {
         const result = await this.platform.showMessageBox({
             type: 'warning',
             message: 'Reset AI session?',
-            detail: 'This clears the current chat history and starts a new Codex session for this terminal. Previous context will no longer be sent.',
+            detail: 'This clears the current chat history and starts a new AI provider session for this terminal. Previous context will no longer be sent.',
             buttons: ['Reset session', 'Cancel'],
             defaultId: 1,
             cancelId: 1,
@@ -160,8 +172,8 @@ export class AIProviderAuthService {
         }
 
         try {
-            const output = await this.execProviderCommand(provider.command, ['login', 'status'])
-            if (/not logged in|not signed in|logged out/i.test(output)) {
+            const output = await this.execProviderCommand(provider.command, this.getAuthStatusArgs(providerID))
+            if (this.isLoggedOutOutput(output)) {
                 return {
                     provider: provider.id,
                     state: 'logged-out',
@@ -169,7 +181,7 @@ export class AIProviderAuthService {
                     detail: output.trim(),
                 }
             }
-            if (/logged in|signed in/i.test(output)) {
+            if (this.isLoggedInOutput(output)) {
                 return {
                     provider: provider.id,
                     state: 'logged-in',
@@ -192,6 +204,14 @@ export class AIProviderAuthService {
                     state: 'not-installed',
                     label: `${provider.label} CLI is not installed`,
                     detail: `Click Install ${provider.label} to run the official installer. After it finishes, return to Tabby and refresh.`,
+                }
+            }
+            if (this.isLoggedOutOutput(message)) {
+                return {
+                    provider: provider.id,
+                    state: 'logged-out',
+                    label: `${provider.label} needs sign in`,
+                    detail: message.trim(),
                 }
             }
             return {
@@ -227,7 +247,7 @@ export class AIProviderAuthService {
     private isProviderCommandAvailable (command: string): Promise<boolean> {
         return new Promise(resolve => {
             if (process.platform === 'win32') {
-                execFile('where.exe', [command], { env: process.env }, (error, stdout) => {
+                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv() }, (error, stdout) => {
                     resolve(!error && Boolean(this.findUsableProviderExecutable(command, stdout)))
                 })
                 return
@@ -244,7 +264,7 @@ export class AIProviderAuthService {
     private async resolveProviderExecutable (command: string): Promise<string|null> {
         return new Promise(resolve => {
             if (process.platform === 'win32') {
-                execFile('where.exe', [command], { env: process.env }, (error, stdout) => {
+                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv() }, (error, stdout) => {
                     if (error) {
                         resolve(null)
                         return
@@ -361,13 +381,20 @@ export class AIProviderAuthService {
     }
 
     private extractAccountLabel (output: string): string {
-        const line = output.split(/\r?\n/).find(item => /logged in/i.test(item))?.trim()
-        return line || 'Signed in'
+        try {
+            const data = JSON.parse(output)
+            return data.email ?? data.account ?? data.subscriptionType ?? data.authMethod ?? 'Signed in'
+        } catch {
+            const line = output.split(/\r?\n/).find(item => /logged in|signed in/i.test(item))?.trim()
+            return line || 'Signed in'
+        }
     }
 
     private async openExternalTerminal (command: string): Promise<void> {
         if (process.platform === 'win32') {
-            await this.spawnDetached('cmd.exe', ['/d', '/k', this.withWindowsUTF8CodePage(command)])
+            const terminalCommand = this.withWindowsUTF8CodePage(command)
+            const launchCommand = `start "" cmd.exe /d /s /k "${terminalCommand}"`
+            await this.spawnDetached('cmd.exe', ['/d', '/s', '/c', launchCommand], true)
             return
         }
         if (process.platform === 'darwin') {
@@ -387,7 +414,7 @@ export class AIProviderAuthService {
 
     private buildProviderLoginCommand (command: string, executable: string|null): string {
         if (command === 'codex') {
-            const loginCommand = this.commandLine([executable ?? 'codex', '--login'])
+            const loginCommand = this.commandLine([this.getExternalTerminalExecutable('codex', executable), '--login'])
             if (executable) {
                 return loginCommand
             }
@@ -397,7 +424,41 @@ export class AIProviderAuthService {
             }
             return `curl -fsSL https://chatgpt.com/codex/install.sh | sh`
         }
+        if (command === 'claude') {
+            if (executable) {
+                return this.commandLine([this.getExternalTerminalExecutable('claude', executable), 'auth', 'login'])
+            }
+            if (process.platform === 'win32') {
+                const installCommand = `irm https://claude.ai/install.ps1 | iex`
+                return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${this.encodePowerShellCommand(installCommand)}`
+            }
+            return `curl -fsSL https://claude.ai/install.sh | bash`
+        }
         return `${command} login`
+    }
+
+    private getExternalTerminalExecutable (command: string, executable: string|null): string {
+        return process.platform === 'win32' ? command : executable ?? command
+    }
+
+    private getAuthStatusArgs (providerID: AIProviderID): string[] {
+        return providerID === 'claude' ? ['auth', 'status'] : ['login', 'status']
+    }
+
+    private getLogoutArgs (providerID: AIProviderID): string[] {
+        return providerID === 'claude' ? ['auth', 'logout'] : ['logout']
+    }
+
+    private isLoggedInOutput (output: string): boolean {
+        return /logged in|signed in|"loggedIn"\s*:\s*true/i.test(output)
+    }
+
+    private isLoggedOutOutput (output: string): boolean {
+        return /not logged in|not signed in|logged out|"loggedIn"\s*:\s*false/i.test(output)
+    }
+
+    private getProviderModels (): Partial<Record<AIProviderID, string>> {
+        return { ...(this.config.store.aiTerminal.providerModels ?? {}) }
     }
 
     private withWindowsUTF8CodePage (command: string): string {
@@ -429,11 +490,20 @@ export class AIProviderAuthService {
 
     private getAugmentedCommandEnv (): NodeJS.ProcessEnv {
         if (process.platform === 'win32') {
-            return process.env
+            const pathKey = this.getWindowsPathEnvKey()
+            const pathEntries = [
+                this.getClaudeNativeInstallDirectory(),
+                process.env[pathKey] ?? process.env.PATH ?? '',
+            ].filter(Boolean)
+            return {
+                ...process.env,
+                [pathKey]: pathEntries.join(';'),
+            }
         }
 
         const home = process.env.HOME
         const pathEntries = [
+            this.getClaudeNativeInstallDirectory(),
             '/opt/homebrew/bin',
             '/opt/homebrew/sbin',
             '/usr/local/bin',
@@ -453,6 +523,7 @@ export class AIProviderAuthService {
     private getWindowsRegistryCommandEnv (): NodeJS.ProcessEnv {
         const pathKey = this.getWindowsPathEnvKey()
         const pathEntries = [
+            this.getClaudeNativeInstallDirectory(),
             this.readWindowsRegistryPath('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
             this.readWindowsRegistryPath('HKCU\\Environment'),
             process.env[pathKey] ?? process.env.PATH ?? '',
@@ -488,6 +559,16 @@ export class AIProviderAuthService {
         return Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'Path'
     }
 
+    private getClaudeNativeInstallDirectory (): string {
+        const home = process.platform === 'win32'
+            ? process.env.USERPROFILE ?? process.env.HOME
+            : process.env.HOME
+        if (!home) {
+            return ''
+        }
+        return process.platform === 'win32' ? `${home}\\.local\\bin` : `${home}/.local/bin`
+    }
+
     private commandLine (args: string[]): string {
         if (process.platform === 'win32') {
             return args.map(arg => {
@@ -506,12 +587,13 @@ export class AIProviderAuthService {
         }).join(' ')
     }
 
-    private spawnDetached (command: string, args: string[]): Promise<void> {
+    private spawnDetached (command: string, args: string[], windowsVerbatimArguments = false): Promise<void> {
         return new Promise((resolve, reject) => {
             const child = spawn(command, args, {
                 detached: true,
                 stdio: 'ignore',
                 windowsHide: false,
+                windowsVerbatimArguments,
                 env: this.getAugmentedCommandEnv(),
             })
             child.once('error', reject)
