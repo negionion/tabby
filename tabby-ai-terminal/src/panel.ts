@@ -12,7 +12,7 @@ const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 const MAX_SAVED_SENDER_COMMANDS = 10
 
 interface SavedSenderCommand {
-    label: string
+    name?: string
     command: string
 }
 
@@ -69,6 +69,7 @@ export class AITerminalPanel {
     private lastFocusRefreshAt = 0
     private environmentRefreshPromptShown = false
     private selectedSavedCommandIndex = -1
+    private senderTagEditor: HTMLElement|null = null
     private statusSubscription: Subscription
     private configSubscription: Subscription|null = null
     private runHandle: AIProviderRunHandle|null = null
@@ -201,6 +202,14 @@ export class AITerminalPanel {
 
         this.savedCommandTabs = document.createElement('div')
         this.savedCommandTabs.className = 'ai-saved-command-tabs'
+        this.savedCommandTabs.addEventListener('wheel', event => {
+            if (this.savedCommandTabs.scrollWidth <= this.savedCommandTabs.clientWidth) {
+                return
+            }
+            event.preventDefault()
+            const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+            this.savedCommandTabs.scrollLeft += delta
+        }, { passive: false })
         this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
         this.renderSavedCommandTabs()
         this.configSubscription = this.config.changed$.subscribe(() => this.renderSavedCommandTabs())
@@ -226,7 +235,7 @@ export class AITerminalPanel {
         this.content.append(chatSection)
 
         this.senderElement.append(
-            this.senderSection('Sender / Command Draft', this.draft, [
+            this.senderSection(this.draft, [
                 this.button('Clear', 'secondary', () => {
                     this.draft.value = ''
                 }),
@@ -247,6 +256,7 @@ export class AITerminalPanel {
 
     destroy (): void {
         this.cancelAnalyze()
+        this.closeSenderTagEditor()
         this.layoutObserver?.disconnect()
         if (this.layoutFrame !== null) {
             cancelAnimationFrame(this.layoutFrame)
@@ -711,7 +721,7 @@ export class AITerminalPanel {
         removeButton.classList.add('ai-saved-command-control', 'is-remove')
         removeButton.title = 'Remove selected saved command'
 
-        const addButton = this.button('＋', 'secondary', () => this.saveCurrentSenderCommand())
+        const addButton = this.button('＋', 'secondary', () => this.openSenderTagEditor())
         addButton.classList.add('ai-saved-command-control', 'is-add')
         addButton.title = 'Save current sender command'
 
@@ -731,22 +741,114 @@ export class AITerminalPanel {
         this.draft.focus()
     }
 
-    private async saveCurrentSenderCommand (): Promise<void> {
-        const command = this.draft.value.trim()
-        if (!command) {
+    private async saveSenderCommand (name: string, command: string, editIndex: number|null): Promise<void> {
+        const savedCommands = this.getSavedSenderCommands()
+        const item: SavedSenderCommand = {
+            command: command.trim(),
+        }
+        if (name.trim()) {
+            item.name = name.trim()
+        }
+
+        if (editIndex !== null && editIndex >= 0 && editIndex < savedCommands.length) {
+            savedCommands[editIndex] = item
+            this.selectedSavedCommandIndex = editIndex
+        } else {
+            if (savedCommands.length >= MAX_SAVED_SENDER_COMMANDS) {
+                savedCommands.splice(0, savedCommands.length - MAX_SAVED_SENDER_COMMANDS + 1)
+            }
+            savedCommands.push(item)
+            this.selectedSavedCommandIndex = savedCommands.length - 1
+        }
+        await this.setSavedSenderCommands(savedCommands)
+    }
+
+    private openSenderTagEditor (editIndex: number|null = null): void {
+        this.closeSenderTagEditor()
+
+        const savedCommand = editIndex === null ? null : this.getSavedSenderCommands()[editIndex]
+        if (editIndex !== null && !savedCommand) {
             return
         }
 
-        const savedCommands = this.getSavedSenderCommands()
-        if (savedCommands.length >= MAX_SAVED_SENDER_COMMANDS) {
-            savedCommands.splice(0, savedCommands.length - MAX_SAVED_SENDER_COMMANDS + 1)
-        }
-        savedCommands.push({
-            label: this.buildSavedCommandLabel(command),
-            command,
+        const overlay = document.createElement('div')
+        overlay.className = 'ai-sender-tag-editor-overlay'
+        overlay.setAttribute('role', 'presentation')
+        this.guardTerminalEvents(overlay)
+
+        const editor = document.createElement('div')
+        editor.className = 'ai-sender-tag-editor'
+        editor.setAttribute('role', 'dialog')
+        editor.setAttribute('aria-modal', 'true')
+        editor.setAttribute('aria-label', editIndex === null ? 'Save Sender Tag' : 'Edit Sender Tag')
+
+        const title = document.createElement('div')
+        title.className = 'ai-sender-tag-editor-title'
+        title.textContent = editIndex === null ? 'Save Sender Tag' : 'Edit Sender Tag'
+
+        const nameLabel = document.createElement('label')
+        nameLabel.className = 'ai-sender-tag-editor-label'
+        nameLabel.textContent = 'Name (optional)'
+
+        const nameInput = document.createElement('input')
+        nameInput.type = 'text'
+        nameInput.className = 'form-control'
+        nameInput.placeholder = 'Leave blank to use the command as the tag name'
+        nameInput.value = savedCommand?.name ?? ''
+        nameLabel.appendChild(nameInput)
+
+        const commandLabel = document.createElement('label')
+        commandLabel.className = 'ai-sender-tag-editor-label'
+        commandLabel.textContent = 'Command'
+
+        const commandInput = document.createElement('textarea')
+        commandInput.className = 'form-control ai-sender-tag-command-input'
+        commandInput.rows = 6
+        commandInput.placeholder = 'Command content to save'
+        commandInput.value = savedCommand?.command ?? this.draft.value.trim()
+        commandLabel.appendChild(commandInput)
+
+        const error = document.createElement('div')
+        error.className = 'ai-sender-tag-editor-error'
+        error.setAttribute('role', 'alert')
+
+        const actions = document.createElement('div')
+        actions.className = 'ai-sender-tag-editor-actions'
+        const cancelButton = this.button('Cancel', 'secondary', () => this.closeSenderTagEditor())
+        const saveButton = this.button(editIndex === null ? 'Save' : 'Update', 'primary', () => {
+            const command = commandInput.value.trim()
+            if (!command) {
+                error.textContent = 'Command cannot be empty.'
+                commandInput.focus()
+                return
+            }
+            saveButton.disabled = true
+            void this.saveSenderCommand(nameInput.value, command, editIndex).then(() => this.closeSenderTagEditor())
         })
-        this.selectedSavedCommandIndex = savedCommands.length - 1
-        await this.setSavedSenderCommands(savedCommands)
+        actions.append(cancelButton, saveButton)
+
+        editor.append(title, nameLabel, commandLabel, error, actions)
+        overlay.appendChild(editor)
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) {
+                this.closeSenderTagEditor()
+            }
+        })
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                this.closeSenderTagEditor()
+            }
+        })
+
+        this.senderTagEditor = overlay
+        document.body.appendChild(overlay)
+        requestAnimationFrame(() => nameInput.focus())
+    }
+
+    private closeSenderTagEditor (): void {
+        this.senderTagEditor?.remove()
+        this.senderTagEditor = null
     }
 
     private async removeSelectedSenderCommand (): Promise<void> {
@@ -776,7 +878,7 @@ export class AITerminalPanel {
         return savedCommands
             .filter((item: any) => item && typeof item.command === 'string' && item.command.trim())
             .map((item: any) => ({
-                label: typeof item.label === 'string' && item.label.trim() ? item.label.trim() : this.buildSavedCommandLabel(item.command),
+                name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : undefined,
                 command: item.command.trim(),
             }))
             .slice(-MAX_SAVED_SENDER_COMMANDS)
@@ -784,29 +886,38 @@ export class AITerminalPanel {
 
     private renderSavedCommandTabs (): void {
         const savedCommands = this.getSavedSenderCommands()
+        const previousScrollLeft = this.savedCommandTabs.scrollLeft
         this.savedCommandTabs.replaceChildren()
         savedCommands.forEach((item, index) => {
             const tab = document.createElement('button')
             tab.type = 'button'
             tab.className = 'ai-saved-command-tab'
             tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
-            tab.textContent = item.label
-            tab.title = item.command
+            tab.textContent = this.buildSavedCommandLabel(item.name || item.command)
+            tab.title = item.name ? `${item.name}\n\n${item.command}\n\nRight-click to edit` : `${item.command}\n\nRight-click to edit`
             tab.addEventListener('click', () => this.insertSavedCommandIntoDraft(item.command, index))
+            tab.addEventListener('contextmenu', event => {
+                event.preventDefault()
+                this.selectedSavedCommandIndex = index
+                this.renderSavedCommandTabs()
+                this.openSenderTagEditor(index)
+            })
             this.savedCommandTabs.appendChild(tab)
         })
+        this.savedCommandTabs.scrollLeft = previousScrollLeft
     }
 
-    private buildSavedCommandLabel (command: string): string {
-        const firstLine = command.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? 'Command'
-        return firstLine.length > 7 ? `${firstLine.slice(0, 7)}...` : firstLine
+    private buildSavedCommandLabel (value: string): string {
+        const firstLine = value.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? 'Command'
+        const characters = Array.from(firstLine)
+        return characters.length > 16 ? `${characters.slice(0, 16).join('')}...` : firstLine
     }
 
     private getSenderCommandInsertMode (): 'replace'|'append' {
         return this.config.store.aiTerminal.senderCommandInsertMode === 'append' ? 'append' : 'replace'
     }
 
-    private senderSection (title: string, body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
+    private senderSection (body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
         const section = document.createElement('div')
         section.className = 'ai-panel-section ai-sender-section'
 
@@ -815,7 +926,7 @@ export class AITerminalPanel {
 
         const titleElement = document.createElement('div')
         titleElement.className = 'ai-panel-title'
-        titleElement.textContent = title
+        titleElement.textContent = 'Sender'
 
         heading.append(titleElement, this.createSavedCommandToolbar())
         section.append(heading, body)

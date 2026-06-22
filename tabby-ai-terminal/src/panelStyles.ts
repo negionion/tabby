@@ -45,6 +45,10 @@ export const AI_TERMINAL_PANEL_STYLES = `
     user-select: text;
     font-size: var(--ai-terminal-font-size);
 }
+.ai-terminal-sender,
+.ai-terminal-sender * {
+    box-sizing: border-box;
+}
 .ai-terminal-panel .btn,
 .ai-terminal-panel .form-control,
 .ai-terminal-sender .btn,
@@ -54,35 +58,47 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-terminal-sender.visible { display: flex; }
 .ai-terminal-sender .ai-panel-section {
     flex: 1;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 0;
     margin-bottom: 0;
+    overflow: hidden;
 }
 .ai-sender-heading {
     flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
     gap: 10px;
     align-items: center;
-    justify-content: space-between;
+}
+.ai-sender-heading > .ai-panel-title {
+    flex: 0 0 auto;
 }
 .ai-saved-command-toolbar {
-    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px 32px;
     gap: 6px;
     align-items: center;
-    justify-content: flex-end;
+    overflow: hidden;
 }
 .ai-saved-command-tabs {
-    flex: 0 1 auto;
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
-    max-width: min(760px, 70%);
     display: flex;
     gap: 6px;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: thin;
-    justify-content: flex-end;
+    justify-content: flex-start;
+    overscroll-behavior-x: contain;
 }
 .ai-saved-command-tab,
 .ai-saved-command-control {
@@ -102,7 +118,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     text-align: center;
 }
 .ai-saved-command-tab {
-    max-width: 10ch;
+    max-width: 20em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -143,8 +159,71 @@ export const AI_TERMINAL_PANEL_STYLES = `
     background: rgba(124, 255, 96, 0.12);
     border-color: #7cff60;
 }
+.ai-sender-tag-editor-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.58);
+}
+.ai-sender-tag-editor {
+    width: min(560px, 100%);
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    padding: 20px;
+    border: 1px solid rgba(143, 211, 255, 0.28);
+    border-radius: 10px;
+    background: #18232d;
+    color: #d7e7f5;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+.ai-sender-tag-editor-title {
+    margin-bottom: 16px;
+    font-size: 18px;
+    font-weight: 600;
+}
+.ai-sender-tag-editor-label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: #b9cad8;
+}
+.ai-sender-tag-editor .form-control {
+    color: #e7f2fa;
+    background: rgba(0, 0, 0, 0.2);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+.ai-sender-tag-editor .form-control:focus {
+    border-color: #8fd3ff;
+    box-shadow: 0 0 0 2px rgba(143, 211, 255, 0.18);
+}
+.ai-sender-tag-command-input {
+    min-height: 130px;
+    resize: vertical;
+    font-family: var(--bs-font-monospace, monospace);
+}
+.ai-sender-tag-editor-error {
+    min-height: 20px;
+    margin-top: -6px;
+    color: #ff8d8d;
+    font-size: 13px;
+}
+.ai-sender-tag-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+}
 .ai-terminal-sender textarea {
     flex: 1;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 0;
     resize: none;
 }
@@ -394,6 +473,9 @@ export const AI_TERMINAL_PANEL_STYLES = `
 }
 .ai-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .ai-terminal-sender .ai-panel-actions {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     justify-content: flex-end;
 }
 .ai-chat-section > .ai-panel-actions {
