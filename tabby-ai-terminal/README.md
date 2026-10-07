@@ -141,8 +141,14 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `src/config.ts` | Default system prompt, AI Terminal settings, and the default `Alt+I` hotkey. |
 | `src/providers.ts` | AI provider definitions, provider status types, and supported model choices. |
 | `src/decorator.ts` | Attaches the AI panel to terminal tabs and forwards terminal input/output events. |
-| `src/panel.ts` | Main panel UI and state: output capture, chat history, analysis requests, reference folders, and the command sender. |
+| `src/panel.ts` | Main panel UI and state: header, chat history, analysis requests, reference folders, and the command sender. |
 | `src/panelStyles.ts` | CSS used by the AI panel and command sender. |
+| `src/outputCapture.ts` | Turns the tab's terminal output into clean lines (line breaks, lone `\r`, line limit) and tracks typed input to skip the prompt after an empty Enter. |
+| `src/markdown.ts` | Markdown renderer for answers and the "Suggested commands" extractor. |
+| `src/redaction.ts` | Removes keys, tokens and passwords from text before it is sent to the provider. |
+| `src/senderTags.ts` | Saved sender tags: normalization, groups, group colors and `{{name}}` placeholders. |
+| `src/dialogs.ts` | Modal dialogs of the sender: the shared shell, the form dialog and the group color dialog. |
+| `src/dom.ts` | Small DOM helpers: buttons, textareas and keeping events away from the terminal. |
 | `src/terminalOutputSanitizer.ts` | Streaming parser that removes ANSI, color, and other terminal control sequences before output is displayed or sent to AI. |
 | `src/buttonProvider.ts` | Adds the AI Terminal toolbar button and handles the toggle hotkey. |
 | `src/hotkeys.ts` | Declares the configurable AI Terminal hotkey. |
@@ -158,6 +164,15 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `src/services/aiTerminal.service.ts` | Coordinates one AI panel per terminal tab and manages panel attachment, visibility, and captured I/O. |
 | `src/services/aiProviderAuth.service.ts` | Finds the provider CLI, checks authentication, starts login/logout flows, and discovers available models. |
 | `src/services/aiProviderRunner.service.ts` | Builds prompts, starts or resumes Codex and Claude Code CLI sessions, streams responses, and resolves optional reference folders. |
+
+## Tests
+
+```powershell
+yarn install
+yarn run test
+```
+
+`test/run.js` transpiles the sources in `src/` and runs each `test/*.test.js` in its own Node.js process. The panel tests use jsdom; Tabby and Angular imports are replaced by the stubs in `test/stubs/`. The CLI tests start the shell-script stand-ins in `test/fixtures/bin/` from a temporary HOME, never the real `claude` or `codex`, and are skipped on Windows. `node test/run.js <name>` runs only the test files whose name contains `<name>`.
 
 ## Build Outputs
 

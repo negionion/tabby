@@ -1,0 +1,18 @@
+#!/bin/sh
+V="$HOME/claude.version"; M="$HOME/claude.mode"
+[ -f "$V" ] || echo 2.1.1 > "$V"
+mode=$(cat "$M" 2>/dev/null)
+case "$1" in
+  --version) echo "$(cat $V) (Claude Code)";;
+  auth) echo '{"loggedIn": true, "email": "x@y"}';;
+  update)
+    echo "$1" >> "$HOME/calls.log"
+    case "$mode" in
+      fail) echo "Error: network unreachable" >&2; exit 1;;
+      prompt) read answer; echo "got:[$answer]"; echo "Claude Code is up to date ($(cat $V))";;
+      current) echo "Claude Code is up to date ($(cat $V))";;
+      slow) sleep 1; echo 2.1.9 > "$V"; echo "Successfully updated to version 2.1.9";;
+      *) echo 2.1.2 > "$V"; echo "Current version: 2.1.1"; echo "Successfully updated from 2.1.1 to version 2.1.2";;
+    esac;;
+  hang) sleep 30;;
+esac

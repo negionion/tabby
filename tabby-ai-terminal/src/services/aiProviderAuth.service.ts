@@ -25,12 +25,18 @@ export interface CliUpdateStatus {
 export interface ProviderCommandInvocation {
     command: string
     args: string[]
-    env: NodeJS.ProcessEnv
+    env: typeof process.env
     cwd?: string
     windowsVerbatimArguments: boolean
 }
 
 const CLI_UPDATE_TIMEOUT_MS = 5 * 60 * 1000
+
+/** The environment variable, or undefined when it is unset or empty */
+function nonEmptyEnv (name: string): string|undefined {
+    const value = process.env[name]
+    return value ? value : undefined
+}
 /** `codex debug models` is spawned at most this often */
 const CODEX_MODEL_CACHE_MS = 10 * 60 * 1000
 const PROVIDER_COMMAND_TIMEOUT_MS = 60 * 1000
@@ -723,7 +729,7 @@ export class AIProviderAuthService {
             return data.email ?? data.account ?? data.subscriptionType ?? data.authMethod ?? 'Signed in'
         } catch {
             const line = output.split(/\r?\n/).find(item => /logged in|signed in/i.test(item))?.trim()
-            return line || 'Signed in'
+            return line ?? 'Signed in'
         }
     }
 
@@ -795,7 +801,7 @@ export class AIProviderAuthService {
     }
 
     private getProviderModels (): Partial<Record<AIProviderID, string>> {
-        return { ...(this.config.store.aiTerminal.providerModels ?? {}) }
+        return { ...this.config.store.aiTerminal.providerModels ?? {} }
     }
 
     private withWindowsUTF8CodePage (command: string): string {
@@ -807,7 +813,7 @@ export class AIProviderAuthService {
     }
 
     private getLinuxTerminalCandidates (command: string): { command: string, args: string[] }[] {
-        const shell = process.env.SHELL || '/bin/sh'
+        const shell = nonEmptyEnv('SHELL') ?? '/bin/sh'
         return [
             { command: 'x-terminal-emulator', args: ['-e', shell, '-lc', command] },
             { command: 'gnome-terminal', args: ['--', shell, '-lc', command] },
@@ -822,10 +828,10 @@ export class AIProviderAuthService {
     }
 
     private getUserLoginShell (): string {
-        return process.env.SHELL || '/bin/zsh'
+        return nonEmptyEnv('SHELL') ?? '/bin/zsh'
     }
 
-    private getAugmentedCommandEnv (): NodeJS.ProcessEnv {
+    private getAugmentedCommandEnv (): typeof process.env {
         if (process.platform === 'win32') {
             const pathKey = this.getWindowsPathEnvKey()
             const pathEntries = [
@@ -857,7 +863,7 @@ export class AIProviderAuthService {
         }
     }
 
-    private getWindowsRegistryCommandEnv (): NodeJS.ProcessEnv {
+    private getWindowsRegistryCommandEnv (): typeof process.env {
         const pathKey = this.getWindowsPathEnvKey()
         const pathEntries = [
             this.getClaudeNativeInstallDirectory(),
@@ -921,7 +927,8 @@ export class AIProviderAuthService {
             if (/^[A-Za-z0-9._/:=-]+$/.test(arg)) {
                 return arg
             }
-            return `'${arg.replace(/'/g, "'\\''")}'`
+            // A single quote inside single quotes is written as '\''
+            return `'${arg.replace(/'/g, '\'\\\'\'')}'`
         }).join(' ')
     }
 

@@ -357,10 +357,8 @@ export class AIProviderRunnerService {
         }
 
         const resolved = path.resolve(trimmed)
-        let stat: fs.Stats
-        try {
-            stat = fs.statSync(resolved)
-        } catch {
+        const stat = this.statPath(resolved)
+        if (!stat) {
             throw new Error(`Reference folder does not exist: ${resolved}`)
         }
         if (!stat.isDirectory()) {
@@ -384,19 +382,14 @@ export class AIProviderRunnerService {
     }
 
     private getCodexHome (): string {
-        return process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
+        const codexHome = process.env.CODEX_HOME
+        return codexHome ? codexHome : path.join(os.homedir(), '.codex')
     }
 
     private findRecentSessionFiles (directory: string, modifiedAfter: number): string[] {
         const files: { path: string, mtime: number }[] = []
         const visit = (dir: string): void => {
-            let entries: fs.Dirent[]
-            try {
-                entries = fs.readdirSync(dir, { withFileTypes: true })
-            } catch {
-                return
-            }
-            for (const entry of entries) {
+            for (const entry of this.readDirectory(dir)) {
                 const fullPath = path.join(dir, entry.name)
                 if (entry.isDirectory()) {
                     visit(fullPath)
@@ -415,6 +408,22 @@ export class AIProviderRunnerService {
         }
         visit(directory)
         return files.sort((a, b) => b.mtime - a.mtime).map(item => item.path)
+    }
+
+    private statPath (target: string): fs.Stats|null {
+        try {
+            return fs.statSync(target)
+        } catch {
+            return null
+        }
+    }
+
+    private readDirectory (dir: string): fs.Dirent[] {
+        try {
+            return fs.readdirSync(dir, { withFileTypes: true })
+        } catch {
+            return []
+        }
     }
 
     private findSessionID (text: string): string|null {
@@ -451,7 +460,7 @@ export class AIProviderRunnerService {
             '</terminal_output>',
             '',
             '<reference_folder>',
-            this.escapePromptContent(referenceFolder?.nativePath || 'No local reference folder selected.'),
+            this.escapePromptContent(referenceFolder?.nativePath ?? 'No local reference folder selected.'),
             '</reference_folder>',
             '',
         ].join('\n')

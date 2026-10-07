@@ -4,37 +4,39 @@ import { ConfigService, MenuItemOptions, PlatformService } from 'tabby-core'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
 import { AIProviderRunnerService, AIProviderRunHandle, AIToolPermissionRequest } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
-import { stripTerminalControlSequences, TerminalOutputSanitizer } from './terminalOutputSanitizer'
+import { TerminalOutputCapture } from './outputCapture'
+import { BuiltDialog, buildFormDialog, buildGroupColorDialog, createDialog } from './dialogs'
+import { button, guardTerminalEvents, textarea } from './dom'
+import { extractSuggestedCommands, renderMarkdown } from './markdown'
+import { redactSensitiveText } from './redaction'
+import {
+    ALL_GROUPS_COLOR,
+    GROUP_COLORS,
+    MAX_SAVED_SENDER_COMMANDS,
+    SavedSenderCommand,
+    UNGROUPED_FILTER,
+    applyGroupColor,
+    automaticGroupColors,
+    buildSavedCommandLabel,
+    chosenGroupColor,
+    fillVariables,
+    findVariableNames,
+    getGroupEndIndex,
+    getSavedGroups,
+    groupColorHex,
+    matchesGroupFilter,
+    normalizeGroupName,
+    normalizeSavedCommands,
+    resolveGroupFilter,
+    withGroupColor,
+} from './senderTags'
 
 const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
 const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
-const MAX_SAVED_SENDER_COMMANDS = 100
-/** Output without a line break is cut into a line of its last MAX_OUTPUT_LINE_CHARS characters past this size */
-const MAX_PENDING_OUTPUT_CHARS = 64 * 1024
-const MAX_OUTPUT_LINE_CHARS = 8 * 1024
 /** How long "CLI is up to date" / "CLI update failed" stays in the header after a check */
 const CLI_NOTICE_MS = 60 * 1000
-/** senderGroupFilter value that shows the tags without a group */
-const UNGROUPED_FILTER = '__ungrouped__'
-/** Group colors that read well on the dark panel; a group without a chosen color gets one from its name */
-const GROUP_COLORS: Record<string, { label: string, hex: string }> = {
-    amber: { label: 'Amber', hex: '#ffc75e' },
-    blue: { label: 'Blue', hex: '#6cb6ff' },
-    green: { label: 'Green', hex: '#7ee787' },
-    purple: { label: 'Purple', hex: '#c297ff' },
-    pink: { label: 'Pink', hex: '#ff8fc8' },
-    teal: { label: 'Teal', hex: '#5fd4d4' },
-    red: { label: 'Red', hex: '#ff7b72' },
-    gray: { label: 'Gray', hex: '#a9b4c0' },
-}
-const AUTO_GROUP_COLORS = ['amber', 'blue', 'green', 'purple', 'pink', 'teal', 'red']
-const ALL_GROUPS_COLOR = '#a9bed1'
 let tagGroupListSeq = 0
-/** Secret names; the lookbehind also matches after "_" (sae_password, wpa_passphrase) but not inside words */
-const SECRET_NAMES = '(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|passphrase|psk)'
-const SECRET_QUOTED_PATTERN = new RegExp(`${SECRET_NAMES}(["']?\\s*[:=]\\s*)(["'])(?:(?!\\3).)*\\3`, 'gi')
-const SECRET_PLAIN_PATTERN = new RegExp(`${SECRET_NAMES}(["']?\\s*[:=]\\s*)([^\\s'",;]+)`, 'gi')
 const DEFAULT_PROMPT_PATTERN = '[#$>]\\s*$'
 const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
@@ -43,12 +45,6 @@ const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '/etc/init\\.d/\\S+\\s+(stop|restart|disable)\\b', '\\bkillall\\b', '\\bkill\\s+-9\\b',
 ]
 const CLAUDE_MODE_LABELS: Partial<Record<string, string>> = { plan: 'Plan', manual: 'Manual', acceptEdits: 'Edit automatically', auto: 'Auto' }
-
-interface SavedSenderCommand {
-    name?: string
-    command: string
-    group?: string
-}
 
 interface PendingPermission {
     requestID: string
@@ -72,8 +68,6 @@ interface LiveRenderState {
 export class AITerminalPanel {
     readonly element: HTMLElement
     readonly senderElement: HTMLElement
-    private providerAuth: AIProviderAuthService
-    private providerRunner: AIProviderRunnerService
     private header: HTMLElement
     private headerControls: HTMLElement
     private referenceFolderRow: HTMLElement
@@ -139,17 +133,16 @@ export class AITerminalPanel {
     private senderStopRequested = false
     private senderForceOpen = false
     private senderPointerDown = false
-    private pendingCarriageReturn = false
     /** True from Analyze until the answer ends, including a wait for a CLI update */
     private analyzing = false
     private providerSwitchedDuringRun = false
     private destroyed = false
+    private openLink = (url: string): void => this.platform.openExternal(url)
     private modelOptionsProvider: AIProviderID|null = null
     /** Automatic group colors, computed once per tag render */
     private automaticGroupColors: Map<string, string>|null = null
     private senderNotice = ''
     private senderProgress = ''
-    private outputLineSeq = 0
     private lineSeqAtSend = 0
     private promptAtLineSeq = 0
     private promptPatternSource: string|null = null
@@ -160,11 +153,13 @@ export class AITerminalPanel {
     private appliedFontSize = 0
     private appliedPanelWidth = 0
     private appliedSenderHeight = 0
-    private recentOutputLines: string[] = []
-    private pendingOutput = ''
-    private outputSanitizer = new TerminalOutputSanitizer()
-    private currentInputLine = ''
-    private skipNextEmptyInputOutputLine = false
+
+    /** Captured terminal output: the lines sent with the next question */
+    private capture = new TerminalOutputCapture({
+        lineLimit: () => this.getSessionOutputLimit(),
+        ignoreEmptyEnterPrompts: () => Boolean(this.config.store.aiTerminal.ignoreEmptyEnterPrompts),
+    })
+
     private visible = false
     private signedIn = false
     private lastPanelVisible = false
@@ -191,13 +186,11 @@ export class AITerminalPanel {
 
     constructor (
         private tab: BaseTerminalTabComponent<any>,
-        providerAuth: AIProviderAuthService,
-        providerRunner: AIProviderRunnerService,
+        private providerAuth: AIProviderAuthService,
+        private providerRunner: AIProviderRunnerService,
         private config: ConfigService,
         private platform: PlatformService,
     ) {
-        this.providerAuth = providerAuth
-        this.providerRunner = providerRunner
         this.statusSubscription = this.providerAuth.statusChanged$.subscribe(status => {
             this.applyProviderStatus(status)
         })
@@ -218,11 +211,31 @@ export class AITerminalPanel {
         })
         this.element = document.createElement('aside')
         this.element.className = 'ai-terminal-panel'
-        this.guardTerminalEvents(this.element)
+        guardTerminalEvents(this.element)
         this.senderElement = document.createElement('div')
         this.senderElement.className = 'ai-terminal-sender'
-        this.guardTerminalEvents(this.senderElement)
+        guardTerminalEvents(this.senderElement)
 
+        this.buildHeaderControls()
+        this.buildChat()
+        this.buildSenderInput()
+        this.assembleHeaderAndChat()
+        this.assembleSender()
+        this.element.append(this.header, this.loginOnly, this.content)
+        this.installResizeHandle(this.element, 'x')
+        this.installResizeHandle(this.senderElement, 'y')
+        this.observeDynamicLayout()
+        this.applyProviderStatus({
+            provider: this.providerAuth.getSelectedProvider(),
+            state: 'checking',
+            label: 'Checking provider status...',
+        })
+        this.render()
+        this.updateSenderState()
+    }
+
+    /** Header controls: provider, model, mode and effort selects, buttons and the running indicator */
+    private buildHeaderControls (): void {
         this.header = document.createElement('div')
         this.header.className = 'ai-provider-header'
 
@@ -289,25 +302,28 @@ export class AITerminalPanel {
         this.content = document.createElement('div')
         this.content.className = 'ai-terminal-content'
 
-        this.moreButton = this.button('⋯', 'secondary', event => this.openMoreMenu(event))
+        this.moreButton = button('⋯', 'secondary', event => this.openMoreMenu(event))
         this.moreButton.classList.add('ai-more-button')
         this.moreButton.title = 'Update CLI, re-check models, log out'
-        this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
-        this.clearLatestButton = this.button('Clear output', 'secondary', () => this.clearLatestSessionOutput())
+        this.loginOnlyLoginButton = button('Install / Login with Provider', 'primary', () => this.login())
+        this.clearLatestButton = button('Clear output', 'secondary', () => this.clearLatestSessionOutput())
         this.clearLatestButton.title = 'Clear the captured output (nothing is sent)'
-        this.resetSessionButton = this.button('Reset Session', 'secondary', () => this.resetSession())
+        this.resetSessionButton = button('Reset Session', 'secondary', () => this.resetSession())
         this.resetSessionButton.classList.add('ai-reset-session-button')
-        this.referenceFolderButton = this.button('Select Folder', 'secondary', () => this.selectReferenceFolder())
-        this.clearReferenceFolderButton = this.button('Clear Folder', 'secondary', () => this.clearReferenceFolder())
+        this.referenceFolderButton = button('Select Folder', 'secondary', () => this.selectReferenceFolder())
+        this.clearReferenceFolderButton = button('Clear Folder', 'secondary', () => this.clearReferenceFolder())
         this.referenceFolderPathElement = document.createElement('span')
         this.referenceFolderPathElement.className = 'ai-reference-folder-path'
-        this.analyzeButton = this.button('Analyze', 'primary', () => this.analyze())
+        this.analyzeButton = button('Analyze', 'primary', () => this.analyze())
         this.analyzeButton.classList.add('ai-analyze-button')
-        this.cancelButton = this.button('Cancel', 'secondary', () => this.cancelAnalyze())
+        this.cancelButton = button('Cancel', 'secondary', () => this.cancelAnalyze())
         this.cancelButton.hidden = true
         this.runningIndicator = this.createRunningIndicator()
+    }
 
-        this.question = this.textarea('Ask about the output (Enter to send)', 1)
+    /** Question box, chat history and the "Output to send" editor */
+    private buildChat (): void {
+        this.question = textarea('Ask about the output (Enter to send)', 1)
         this.question.classList.add('ai-question-input')
         this.question.title = 'Enter: send - Shift+Enter: new line - Up/Down: previous questions - Esc: cancel'
         this.question.addEventListener('input', () => this.updateQuestionBox())
@@ -357,7 +373,7 @@ export class AITerminalPanel {
                 this.jumpLatestButton.hidden = true
             }
         })
-        this.jumpLatestButton = this.button('↓ Latest', 'primary', () => {
+        this.jumpLatestButton = button('↓ Latest', 'primary', () => {
             this.jumpLatestButton.hidden = true
             this.scrollChatToBottom(true)
         })
@@ -414,7 +430,10 @@ export class AITerminalPanel {
         this.chatViewport.append(this.emptyState, this.chatHistory)
         this.chatStack.append(this.chatViewport, this.jumpLatestButton, this.latestOutputDetails)
         this.chatBody.append(this.chatStack, this.exampleRow, this.question)
+    }
 
+    /** Sender tag and group bars, the draft and the listeners that keep the sender open or collapse it */
+    private buildSenderInput (): void {
         this.savedCommandTabs = document.createElement('div')
         this.savedCommandTabs.className = 'ai-saved-command-tabs'
         this.savedCommandTabs.addEventListener('wheel', event => {
@@ -435,7 +454,7 @@ export class AITerminalPanel {
             event.preventDefault()
             this.savedGroupBar.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
         }, { passive: false })
-        this.draft = this.textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
+        this.draft = textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
         this.draft.addEventListener('input', () => this.updateSenderState())
         this.draft.addEventListener('focus', () => this.updateSenderState())
         this.draft.addEventListener('blur', event => {
@@ -468,7 +487,10 @@ export class AITerminalPanel {
                 }
             }
         })
+    }
 
+    /** Puts the header rows, the sign-in view and the chat section together */
+    private assembleHeaderAndChat (): void {
         this.resetSessionButton.textContent = 'New session'
         this.resetSessionButton.title = 'Start a new conversation'
         this.headerControls.append(
@@ -491,7 +513,7 @@ export class AITerminalPanel {
         this.headerSummary.title = 'Click to show settings'
         this.headerSummaryText = document.createElement('span')
         this.headerSummaryText.className = 'ai-header-summary-text'
-        const summaryNewSession = this.button('New session', 'secondary', event => {
+        const summaryNewSession = button('New session', 'secondary', event => {
             event.stopPropagation()
             void this.resetSession()
         })
@@ -535,7 +557,7 @@ export class AITerminalPanel {
         this.loginOnly.append(
             this.section('AI Provider', this.statusLine, [
                 this.loginOnlyLoginButton,
-                this.button('Refresh', 'secondary', () => this.refreshProviderStatus()),
+                button('Refresh', 'secondary', () => this.refreshProviderStatus()),
             ]),
         )
 
@@ -543,17 +565,20 @@ export class AITerminalPanel {
         chatSection.classList.add('ai-chat-section')
         chatSection.querySelector(':scope > .ai-panel-title')?.remove()
         this.content.append(chatSection)
+    }
 
+    /** Sender actions (Send next / Send all / Stop) and the click that expands a collapsed sender */
+    private assembleSender (): void {
         this.senderNextPreview = document.createElement('span')
         this.senderNextPreview.className = 'ai-sender-next'
-        this.senderClearButton = this.button('Clear', 'secondary', () => {
+        this.senderClearButton = button('Clear', 'secondary', () => {
             this.draft.value = ''
             this.senderNotice = ''
             this.updateSenderState()
         })
-        this.senderLineButton = this.button('Send next', 'success', () => this.sendDraftLine())
-        this.senderAllButton = this.button('Send all', 'success', () => this.sendDraftAll())
-        this.senderStopButton = this.button('Stop', 'danger', () => {
+        this.senderLineButton = button('Send next', 'success', () => this.sendDraftLine())
+        this.senderAllButton = button('Send all', 'success', () => this.sendDraftAll())
+        this.senderStopButton = button('Stop', 'danger', () => {
             this.senderStopRequested = true
         })
         this.senderStopButton.hidden = true
@@ -578,18 +603,6 @@ export class AITerminalPanel {
                 setTimeout(() => this.draft.focus())
             }
         })
-
-        this.element.append(this.header, this.loginOnly, this.content)
-        this.installResizeHandle(this.element, 'x')
-        this.installResizeHandle(this.senderElement, 'y')
-        this.observeDynamicLayout()
-        this.applyProviderStatus({
-            provider: this.providerAuth.getSelectedProvider(),
-            state: 'checking',
-            label: 'Checking provider status...',
-        })
-        this.render()
-        this.updateSenderState()
     }
 
     destroy (): void {
@@ -622,38 +635,12 @@ export class AITerminalPanel {
     }
 
     appendOutput (data: string): void {
-        let text = this.outputSanitizer.write(data)
-        if (this.pendingCarriageReturn) {
-            text = `\r${text}`
-            this.pendingCarriageReturn = false
-        }
-        // A trailing \r may be the first half of a \r\n split across chunks
-        if (text.endsWith('\r')) {
-            this.pendingCarriageReturn = true
-            text = text.slice(0, -1)
-        }
-        if (!text) {
+        if (!this.capture.write(data)) {
             return
         }
-
-        const segments = text.replace(/\r+\n/g, '\n').split('\n')
-        segments[0] = this.pendingOutput + segments[0]
-        // A lone \r returns to the line start (progress bars, prompt redraws): keep what was written after it
-        this.pendingOutput = this.afterCarriageReturn(segments.pop() ?? '')
-        for (const segment of segments) {
-            this.appendOutputLine(this.afterCarriageReturn(segment))
-            this.outputLineSeq++
-        }
-        if (this.pendingOutput.length > MAX_PENDING_OUTPUT_CHARS) {
-            // Output without line breaks must not grow without limit
-            this.appendOutputLine(this.pendingOutput.slice(-MAX_OUTPUT_LINE_CHARS))
-            this.outputLineSeq++
-            this.pendingOutput = ''
-        }
-        this.trimRecentOutput()
         // While "Send all" is waiting, remember when a shell prompt appears after new output lines
-        if (this.senderBusy && this.pendingOutput.length < 300 && this.getPromptPattern().test(this.normalizeOutputLine(this.pendingOutput))) {
-            this.promptAtLineSeq = this.outputLineSeq
+        if (this.senderBusy && this.capture.pending.length < 300 && this.getPromptPattern().test(this.capture.getPendingLine())) {
+            this.promptAtLineSeq = this.capture.lineSeq
         }
         this.scheduleOutputRender()
     }
@@ -677,16 +664,10 @@ export class AITerminalPanel {
     }
 
     handleInput (data: string|Buffer): void {
-        if (!this.shouldIgnoreEmptyEnterPrompts()) {
-            return
-        }
-
         const text = Buffer.isBuffer(data) ? data.toString('utf-8') : data
-        if (!text) {
-            return
+        if (text) {
+            this.capture.trackInput(text)
         }
-
-        this.trackTerminalInput(text)
     }
 
     toggle (): void {
@@ -720,11 +701,10 @@ export class AITerminalPanel {
             question = retry.question
             terminalOutput = retry.terminalOutput
         } else {
-            this.flushPendingOutput()
-            this.skipNextEmptyInputOutputLine = false
-            this.trimRecentOutput()
-            question = this.redactSensitiveText(this.question.value.trim())
-            terminalOutput = this.redactSensitiveText(this.getRecentOutputText())
+            this.capture.flush()
+            this.capture.resetInputTracking()
+            question = redactSensitiveText(this.question.value.trim())
+            terminalOutput = redactSensitiveText(this.capture.getText())
             if (question && this.questionHistory[this.questionHistory.length - 1] !== question) {
                 this.questionHistory.push(question)
                 this.questionHistory = this.questionHistory.slice(-50)
@@ -812,8 +792,7 @@ export class AITerminalPanel {
                 this.question.value = ''
                 this.updateQuestionBox()
             }
-            this.currentInputLine = ''
-            this.skipNextEmptyInputOutputLine = false
+            this.capture.resetInputTracking()
             this.render()
         } catch (error) {
             this.appendAnalysis(error instanceof Error ? error.message : `${error}`)
@@ -862,8 +841,8 @@ export class AITerminalPanel {
                 },
             }
             actions.append(
-                this.button('Allow', 'success', () => item.finish(true, 'Allowed')),
-                this.button('Deny', 'danger', () => item.finish(false, 'Denied')),
+                button('Allow', 'success', () => item.finish(true, 'Allowed')),
+                button('Deny', 'danger', () => item.finish(false, 'Denied')),
             )
             card.append(title, detail, actions)
             this.chatHistory.appendChild(card)
@@ -956,7 +935,7 @@ export class AITerminalPanel {
                 analysis.after(live.view)
                 analysis.hidden = true
             }
-            live.view.replaceChildren(...Array.from(this.renderMarkdown(analysis.textContent ?? '').childNodes))
+            live.view.replaceChildren(...Array.from(renderMarkdown(analysis.textContent ?? '', this.openLink).childNodes))
             this.scrollChatToBottom()
         }, 200)
     }
@@ -1006,7 +985,7 @@ export class AITerminalPanel {
         if (this.getFontSize() !== this.appliedFontSize) {
             this.applyFontSize()
         }
-        this.trimRecentOutput()
+        this.capture.trim()
         const senderVisible = this.visible && this.signedIn
         this.element.classList.toggle('visible', this.visible)
         this.senderElement.classList.toggle('visible', senderVisible)
@@ -1018,7 +997,7 @@ export class AITerminalPanel {
             this.requestTerminalRefit()
         }
 
-        const lines = this.getDisplayOutputLines()
+        const lines = this.capture.getDisplayLines()
         const chatEmpty = this.chatHistory.childElementCount === 0
         if (this.latestOutputAuto) {
             // Open the captured output on an empty chat; keep it closed after an answer
@@ -1522,7 +1501,7 @@ export class AITerminalPanel {
     }
 
     private sendToTerminal (line: string): void {
-        this.lineSeqAtSend = this.outputLineSeq
+        this.lineSeqAtSend = this.capture.lineSeq
         this.handleInput(`${line}\r`)
         this.tab.sendInput(`${line}\r`)
     }
@@ -1718,11 +1697,11 @@ export class AITerminalPanel {
         }
         if (actions) {
             const raw = analysis.dataset.raw ?? analysis.textContent ?? ''
-            const open = this.button('Open', 'secondary', () => this.openAnswerViewer(raw, meta?.textContent ?? ''))
+            const open = button('Open', 'secondary', () => this.openAnswerViewer(raw, meta?.textContent ?? ''))
             open.title = 'Read the answer in a large window'
-            const copy = this.button('Copy', 'secondary', () => this.copyText(raw))
+            const copy = button('Copy', 'secondary', () => this.copyText(raw))
             copy.title = 'Copy the whole answer'
-            const retry = this.button('Retry', 'secondary', () => {
+            const retry = button('Retry', 'secondary', () => {
                 if (this.runHandle) {
                     return
                 }
@@ -1738,7 +1717,7 @@ export class AITerminalPanel {
         this.closeAnswerViewer()
         const overlay = document.createElement('div')
         overlay.className = 'ai-viewer-overlay'
-        this.guardTerminalEvents(overlay)
+        guardTerminalEvents(overlay)
         const viewer = document.createElement('div')
         viewer.className = 'ai-viewer'
         viewer.setAttribute('role', 'dialog')
@@ -1748,11 +1727,11 @@ export class AITerminalPanel {
         const title = document.createElement('span')
         title.className = 'ai-viewer-title'
         title.textContent = metaText ? `Answer · ${metaText}` : 'Answer'
-        const copy = this.button('Copy', 'secondary', () => this.copyText(raw))
-        const close = this.button('Close', 'secondary', () => this.closeAnswerViewer())
+        const copy = button('Copy', 'secondary', () => this.copyText(raw))
+        const close = button('Close', 'secondary', () => this.closeAnswerViewer())
         close.title = 'Close (Esc)'
         head.append(title, copy, close)
-        const body = this.renderMarkdown(raw)
+        const body = renderMarkdown(raw, this.openLink)
         body.className = 'ai-viewer-body ai-markdown'
         viewer.append(head, body)
         overlay.appendChild(viewer)
@@ -1793,9 +1772,7 @@ export class AITerminalPanel {
     }
 
     private getDisplayOutputCount (): number {
-        const pendingLine = this.normalizeOutputLine(this.pendingOutput)
-        const hasPending = pendingLine && !(this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts())
-        return this.recentOutputLines.length + (hasPending ? 1 : 0)
+        return this.capture.getDisplayCount()
     }
 
     private updateAnalyzeLabel (): void {
@@ -1892,8 +1869,8 @@ export class AITerminalPanel {
         if (!text.trim() || text === ANALYSIS_PLACEHOLDER) {
             return
         }
-        const { commands, rest } = this.extractSuggestedCommands(text)
-        const rendered = this.renderMarkdown(rest)
+        const { commands, rest } = extractSuggestedCommands(text)
+        const rendered = renderMarkdown(rest, this.openLink)
         rendered.className = 'ai-analysis ai-chat-analysis ai-markdown'
         rendered.dataset.raw = text
         analysis.replaceWith(rendered)
@@ -1906,19 +1883,6 @@ export class AITerminalPanel {
         this.scrollChatToBottom()
     }
 
-    /** Only the code block under the "Suggested commands" heading is treated as commands */
-    private extractSuggestedCommands (text: string): { commands: string[], rest: string } {
-        const match = /(^|\n)[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?Suggested commands(?:\*\*)?:?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*```[^\n]*\n([\s\S]*?)```/i.exec(text)
-        if (!match) {
-            return { commands: [], rest: text }
-        }
-        // Control characters (a lone \r, ESC) are removed: they would run extra commands or hide text in the terminal
-        const commands = match[2].split(/\r\n?|\n/)
-            .map(line => line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim())
-            .filter(line => line && !line.startsWith('#'))
-        return { commands, rest: `${text.slice(0, match.index)}${match[1]}${text.slice(match.index + match[0].length)}`.trimEnd() }
-    }
-
     private renderSuggestedCommands (commands: string[]): HTMLElement {
         const box = document.createElement('div')
         box.className = 'ai-suggested'
@@ -1929,7 +1893,7 @@ export class AITerminalPanel {
         const target = document.createElement('span')
         target.className = 'ai-suggested-target'
         target.textContent = `→ ${this.getTargetLabel()}`
-        const allButton = this.button('All →', 'secondary', () => this.appendToDraft(commands.join('\n')))
+        const allButton = button('All →', 'secondary', () => this.appendToDraft(commands.join('\n')))
         allButton.title = 'Put every command into the Sender'
         head.append(title, target, allButton)
         box.appendChild(head)
@@ -1939,229 +1903,16 @@ export class AITerminalPanel {
             const code = document.createElement('code')
             code.textContent = command
             code.title = command
-            const send = this.button('▶', 'success', () => void this.sendSingleCommand(command))
+            const send = button('▶', 'success', () => void this.sendSingleCommand(command))
             send.title = `Send to ${this.getTargetLabel()} now`
-            const stage = this.button('→', 'secondary', () => this.appendToDraft(command))
+            const stage = button('→', 'secondary', () => this.appendToDraft(command))
             stage.title = 'Put into the Sender'
-            const copy = this.button('Copy', 'secondary', () => this.copyText(command))
+            const copy = button('Copy', 'secondary', () => this.copyText(command))
             copy.title = 'Copy to clipboard'
             row.append(code, send, stage, copy)
             box.appendChild(row)
         }
         return box
-    }
-
-    /**
-     * Small markdown renderer for answers: headings, paragraphs, nested lists, blockquotes, rules,
-     * tables, fenced code and inline code / bold / italic / links. Text is always set via textContent.
-     */
-    private renderMarkdown (text: string): HTMLElement {
-        const root = document.createElement('div')
-        const lines = text.replace(/\r\n?/g, '\n').split('\n')
-        let paragraph: string[] = []
-        let lists: { indent: number, ordered: boolean, element: HTMLElement }[] = []
-        let quote: HTMLElement|null = null
-        const container = () => quote ?? root
-        const flushParagraph = () => {
-            if (paragraph.length) {
-                const p = document.createElement('p')
-                paragraph.forEach((line, index) => {
-                    if (index) {
-                        p.appendChild(document.createElement('br'))
-                    }
-                    this.renderInline(p, line)
-                })
-                container().appendChild(p)
-                paragraph = []
-            }
-        }
-        const closeLists = () => {
-            lists = []
-        }
-        for (let index = 0; index < lines.length; index++) {
-            let line = lines[index]
-            const quoted = /^\s*>\s?(.*)$/.exec(line)
-            if (quoted) {
-                if (!quote) {
-                    flushParagraph()
-                    closeLists()
-                    quote = document.createElement('blockquote')
-                    root.appendChild(quote)
-                }
-                line = quoted[1]
-            } else if (quote) {
-                flushParagraph()
-                closeLists()
-                quote = null
-            }
-            if (/^\s*```/.test(line)) {
-                flushParagraph()
-                closeLists()
-                const body: string[] = []
-                index++
-                while (index < lines.length && !/^\s*```/.test(lines[index])) {
-                    body.push(lines[index])
-                    index++
-                }
-                const pre = document.createElement('pre')
-                pre.className = 'ai-md-code'
-                pre.textContent = body.join('\n')
-                container().appendChild(pre)
-                continue
-            }
-            if (/^\s*\|.*\|\s*$/.test(line)) {
-                flushParagraph()
-                closeLists()
-                const table = document.createElement('table')
-                table.className = 'ai-md-table'
-                let header = true
-                while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
-                    const cells = lines[index].trim().slice(1, -1).split('|').map(cell => cell.trim())
-                    if (cells.every(cell => /^:?-{2,}:?$/.test(cell))) {
-                        index++
-                        continue
-                    }
-                    const tr = document.createElement('tr')
-                    for (const cell of cells) {
-                        const td = document.createElement(header ? 'th' : 'td')
-                        this.renderInline(td, cell)
-                        tr.appendChild(td)
-                    }
-                    table.appendChild(tr)
-                    header = false
-                    index++
-                }
-                index--
-                const wrap = document.createElement('div')
-                wrap.className = 'ai-md-table-wrap'
-                wrap.appendChild(table)
-                container().appendChild(wrap)
-                continue
-            }
-            if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
-                flushParagraph()
-                closeLists()
-                container().appendChild(document.createElement('hr'))
-                continue
-            }
-            const heading = /^\s*(#{1,6})\s+(.*)$/.exec(line)
-            if (heading) {
-                flushParagraph()
-                closeLists()
-                const h = document.createElement('div')
-                h.className = `ai-md-heading ai-md-h${heading[1].length}`
-                this.renderInline(h, heading[2].replace(/\s+#+\s*$/, ''))
-                container().appendChild(h)
-                continue
-            }
-            const item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
-            if (item) {
-                flushParagraph()
-                const indent = item[1].replace(/\t/g, '    ').length
-                const ordered = /\d/.test(item[2])
-                while (lists.length && indent < lists[lists.length - 1].indent) {
-                    lists.pop()
-                }
-                let top = lists[lists.length - 1] as typeof lists[number]|undefined
-                if (!top || indent > top.indent || top.ordered !== ordered) {
-                    if (top && indent === top.indent) {
-                        lists.pop()
-                    }
-                    const parentList = lists[lists.length - 1] as typeof lists[number]|undefined
-                    const element = document.createElement(ordered ? 'ol' : 'ul')
-                    const host = parentList?.element.lastElementChild ?? container()
-                    host.appendChild(element)
-                    top = { indent, ordered, element }
-                    lists.push(top)
-                }
-                const li = document.createElement('li')
-                this.renderInline(li, item[3])
-                top.element.appendChild(li)
-                continue
-            }
-            if (!line.trim()) {
-                flushParagraph()
-                closeLists()
-                continue
-            }
-            if (lists.length && /^\s{2,}\S/.test(line)) {
-                const lastItem = lists[lists.length - 1].element.lastElementChild as HTMLElement|null
-                if (lastItem) {
-                    lastItem.appendChild(document.createElement('br'))
-                    this.renderInline(lastItem, line.trim())
-                    continue
-                }
-            }
-            closeLists()
-            paragraph.push(line)
-        }
-        flushParagraph()
-        return root
-    }
-
-    private renderInline (parent: HTMLElement, text: string): void {
-        let buffer = ''
-        const flush = () => {
-            if (buffer) {
-                parent.appendChild(document.createTextNode(buffer))
-                buffer = ''
-            }
-        }
-        let index = 0
-        while (index < text.length) {
-            const rest = text.slice(index)
-            const code = /^(`+)([\s\S]+?)\1(?!`)/.exec(rest)
-            if (code) {
-                flush()
-                const element = document.createElement('code')
-                element.textContent = code[2].trim() || code[2]
-                parent.appendChild(element)
-                index += code[0].length
-                continue
-            }
-            const strong = /^(\*\*|__)(?=\S)([\s\S]*?\S)\1/.exec(rest)
-            if (strong) {
-                flush()
-                const element = document.createElement('strong')
-                this.renderInline(element, strong[2])
-                parent.appendChild(element)
-                index += strong[0].length
-                continue
-            }
-            // "_" only starts emphasis at a word boundary, so snake_case names stay literal
-            const em = /^\*(?=\S)([^*]+?\S|\S)\*(?!\*)/.exec(rest) ?? (index === 0 || !/\w/.test(text[index - 1]) ? /^_(?=\S)([^_]+?\S|\S)_(?!\w)/.exec(rest) : null)
-            if (em) {
-                flush()
-                const element = document.createElement('em')
-                this.renderInline(element, em[1])
-                parent.appendChild(element)
-                index += em[0].length
-                continue
-            }
-            const link = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(rest)
-            if (link) {
-                flush()
-                const anchor = document.createElement('a')
-                anchor.className = 'ai-md-link'
-                anchor.textContent = link[1]
-                const url = link[2]
-                anchor.title = url
-                anchor.href = '#'
-                anchor.addEventListener('click', event => {
-                    event.preventDefault()
-                    // Only open web links, externally
-                    if (/^https?:\/\//i.test(url)) {
-                        this.platform.openExternal(url)
-                    }
-                })
-                parent.appendChild(anchor)
-                index += link[0].length
-                continue
-            }
-            buffer += text[index]
-            index++
-        }
-        flush()
     }
 
     private createSavedCommandToolbar (): HTMLElement {
@@ -2172,7 +1923,7 @@ export class AITerminalPanel {
         const row = document.createElement('div')
         row.className = 'ai-saved-command-row'
 
-        const addButton = this.button('+ Save', 'secondary', () => this.openSenderTagEditor())
+        const addButton = button('+ Save', 'secondary', () => this.openSenderTagEditor())
         addButton.classList.add('ai-saved-command-control', 'is-add')
         addButton.title = 'Save the Sender content as a tag. Use {{name}} for values to fill in when inserting.'
 
@@ -2187,14 +1938,13 @@ export class AITerminalPanel {
 
     /** Fills the {{name}} placeholders of the commands, asking for all values in one dialog */
     private resolveVariables (commands: string[], done: (filled: string[]) => void): void {
-        const pattern = /\{\{\s*([\w.-]+)\s*\}\}/g
-        const names = [...new Set(commands.flatMap(command => [...command.matchAll(pattern)].map(match => match[1])))]
+        const names = findVariableNames(commands)
         if (!names.length) {
             done(commands)
             return
         }
         this.openVariableDialog(names, values => {
-            done(commands.map(command => command.replace(pattern, (_, name: string) => values[name])))
+            done(commands.map(command => fillVariables(command, values)))
         })
     }
 
@@ -2217,62 +1967,25 @@ export class AITerminalPanel {
 
     /** Modal with one text input per field; submit returns false to keep the dialog open */
     private openFormDialog (title: string, fields: { label: string, value: string }[], confirmLabel: string, submit: (values: string[]) => boolean): void {
+        this.showDialog(buildFormDialog({
+            title,
+            fields,
+            confirmLabel,
+            close: () => this.closeSenderTagEditor(),
+            submit: values => {
+                if (submit(values)) {
+                    this.closeSenderTagEditor()
+                }
+            },
+        }))
+    }
+
+    /** Shows a dialog from dialogs.ts; one sender dialog is open at a time */
+    private showDialog (dialog: BuiltDialog): void {
         this.closeSenderTagEditor()
-        const overlay = document.createElement('div')
-        overlay.className = 'ai-sender-tag-editor-overlay'
-        this.guardTerminalEvents(overlay)
-        const editor = document.createElement('div')
-        editor.className = 'ai-sender-tag-editor'
-        editor.setAttribute('role', 'dialog')
-        const titleElement = document.createElement('div')
-        titleElement.className = 'ai-sender-tag-editor-title'
-        titleElement.textContent = title
-        editor.appendChild(titleElement)
-        const inputs = fields.map(field => {
-            const label = document.createElement('label')
-            label.className = 'ai-sender-tag-editor-label'
-            label.textContent = field.label
-            const input = document.createElement('input')
-            input.type = 'text'
-            input.className = 'form-control'
-            input.value = field.value
-            label.appendChild(input)
-            editor.appendChild(label)
-            return input
-        })
-        const confirm = () => {
-            if (submit(inputs.map(input => input.value))) {
-                this.closeSenderTagEditor()
-            }
-        }
-        const actions = document.createElement('div')
-        actions.className = 'ai-sender-tag-editor-actions'
-        actions.append(
-            this.button('Cancel', 'secondary', () => this.closeSenderTagEditor()),
-            this.button(confirmLabel, 'primary', confirm),
-        )
-        editor.appendChild(actions)
-        overlay.appendChild(editor)
-        overlay.addEventListener('mousedown', event => {
-            if (event.target === overlay) {
-                this.closeSenderTagEditor()
-            }
-        })
-        overlay.addEventListener('keydown', event => {
-            if (event.key === 'Escape') {
-                event.preventDefault()
-                this.closeSenderTagEditor()
-            } else if (event.key === 'Enter' && !event.isComposing) {
-                event.preventDefault()
-                confirm()
-            }
-        })
-        this.senderTagEditor = overlay
-        document.body.appendChild(overlay)
-        requestAnimationFrame(() => {
-            inputs[0].focus()
-            inputs[0].select()
-        })
+        this.senderTagEditor = dialog.overlay
+        document.body.appendChild(dialog.overlay)
+        requestAnimationFrame(dialog.focus)
     }
 
     private insertResolvedCommand (command: string, index: number): void {
@@ -2301,7 +2014,7 @@ export class AITerminalPanel {
         if (name.trim()) {
             item.name = name.trim()
         }
-        const groupName = this.normalizeGroupName(group)
+        const groupName = normalizeGroupName(group)
         if (groupName) {
             item.group = groupName
         }
@@ -2314,39 +2027,25 @@ export class AITerminalPanel {
                 savedCommands.splice(0, savedCommands.length - MAX_SAVED_SENDER_COMMANDS + 1)
             }
             // A new tag goes right after the other tags of its group
-            const insertAt = this.getGroupEndIndex(savedCommands, item.group)
+            const insertAt = getGroupEndIndex(savedCommands, item.group)
             savedCommands.splice(insertAt, 0, item)
             this.selectedSavedCommandIndex = insertAt
         }
         // Show the group the tag was saved to when the current filter would hide it
-        if (!this.matchesGroupFilter(item, this.getGroupFilter(savedCommands))) {
+        if (!matchesGroupFilter(item, this.getGroupFilter(savedCommands))) {
             this.config.store.aiTerminal.senderGroupFilter = groupName ?? ''
         }
         await this.setSavedSenderCommands(savedCommands)
     }
 
     private openSenderTagEditor (editIndex: number|null = null): void {
-        this.closeSenderTagEditor()
 
         const savedCommand = editIndex === null ? null : this.getSavedSenderCommands()[editIndex]
         if (editIndex !== null && !savedCommand) {
             return
         }
 
-        const overlay = document.createElement('div')
-        overlay.className = 'ai-sender-tag-editor-overlay'
-        overlay.setAttribute('role', 'presentation')
-        this.guardTerminalEvents(overlay)
-
-        const editor = document.createElement('div')
-        editor.className = 'ai-sender-tag-editor'
-        editor.setAttribute('role', 'dialog')
-        editor.setAttribute('aria-modal', 'true')
-        editor.setAttribute('aria-label', editIndex === null ? 'Save Sender Tag' : 'Edit Sender Tag')
-
-        const title = document.createElement('div')
-        title.className = 'ai-sender-tag-editor-title'
-        title.textContent = editIndex === null ? 'Save Sender Tag' : 'Edit Sender Tag'
+        const { overlay, editor } = createDialog(editIndex === null ? 'Save Sender Tag' : 'Edit Sender Tag', () => this.closeSenderTagEditor())
 
         const nameLabel = document.createElement('label')
         nameLabel.className = 'ai-sender-tag-editor-label'
@@ -2370,7 +2069,7 @@ export class AITerminalPanel {
         groupInput.value = savedCommand ? savedCommand.group ?? '' : this.getActiveGroup() ?? ''
         const groupOptions = document.createElement('datalist')
         groupOptions.id = `ai-sender-tag-groups-${++tagGroupListSeq}`
-        for (const group of this.getSavedGroups(this.getSavedSenderCommands())) {
+        for (const group of getSavedGroups(this.getSavedSenderCommands())) {
             const option = document.createElement('option')
             option.value = group
             groupOptions.appendChild(option)
@@ -2395,16 +2094,16 @@ export class AITerminalPanel {
 
         const actions = document.createElement('div')
         actions.className = 'ai-sender-tag-editor-actions'
-        const cancelButton = this.button('Cancel', 'secondary', () => this.closeSenderTagEditor())
+        const cancelButton = button('Cancel', 'secondary', () => this.closeSenderTagEditor())
         if (editIndex !== null) {
-            const deleteButton = this.button('Delete', 'danger', () => {
+            const deleteButton = button('Delete', 'danger', () => {
                 this.selectedSavedCommandIndex = editIndex
                 void this.removeSelectedSenderCommand().then(() => this.closeSenderTagEditor())
             })
             deleteButton.classList.add('ai-tag-delete-button')
             actions.appendChild(deleteButton)
         }
-        const saveButton = this.button(editIndex === null ? 'Save' : 'Update', 'primary', () => {
+        const saveButton = button(editIndex === null ? 'Save' : 'Update', 'primary', () => {
             const command = commandInput.value.trim()
             if (!command) {
                 error.textContent = 'Command cannot be empty.'
@@ -2416,23 +2115,8 @@ export class AITerminalPanel {
         })
         actions.append(cancelButton, saveButton)
 
-        editor.append(title, nameLabel, groupLabel, commandLabel, error, actions)
-        overlay.appendChild(editor)
-        overlay.addEventListener('mousedown', event => {
-            if (event.target === overlay) {
-                this.closeSenderTagEditor()
-            }
-        })
-        overlay.addEventListener('keydown', event => {
-            if (event.key === 'Escape') {
-                event.preventDefault()
-                this.closeSenderTagEditor()
-            }
-        })
-
-        this.senderTagEditor = overlay
-        document.body.appendChild(overlay)
-        requestAnimationFrame(() => nameInput.focus())
+        editor.append(nameLabel, groupLabel, commandLabel, error, actions)
+        this.showDialog({ overlay, focus: () => nameInput.focus() })
     }
 
     private closeSenderTagEditor (): void {
@@ -2459,44 +2143,12 @@ export class AITerminalPanel {
     }
 
     private getSavedSenderCommands (): SavedSenderCommand[] {
-        const savedCommands = this.config.store.aiTerminal.savedSenderCommands
-        if (!Array.isArray(savedCommands)) {
-            return []
-        }
-
-        return savedCommands
-            .filter((item: any) => item && typeof item.command === 'string' && item.command.trim())
-            .map((item: any) => {
-                const command: SavedSenderCommand = {
-                    name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : undefined,
-                    command: item.command.trim(),
-                }
-                const group = typeof item.group === 'string' ? this.normalizeGroupName(item.group) : undefined
-                if (group) {
-                    command.group = group
-                }
-                return command
-            })
-            .slice(-MAX_SAVED_SENDER_COMMANDS)
-    }
-
-    private normalizeGroupName (value: string): string|undefined {
-        const name = Array.from(value.trim()).slice(0, 40).join('').trim()
-        return name && name !== UNGROUPED_FILTER ? name : undefined
-    }
-
-    /** Groups in the order their first tag appears */
-    private getSavedGroups (commands: SavedSenderCommand[]): string[] {
-        return [...new Set(commands.map(item => item.group).filter((group): group is string => Boolean(group)))]
+        return normalizeSavedCommands(this.config.store.aiTerminal.savedSenderCommands)
     }
 
     /** Current group filter: '' for all tags, a group name, or UNGROUPED_FILTER */
     private getGroupFilter (commands: SavedSenderCommand[]): string {
-        const filter = this.config.store.aiTerminal.senderGroupFilter
-        if (filter === UNGROUPED_FILTER) {
-            return commands.some(item => item.group) && commands.some(item => !item.group) ? filter : ''
-        }
-        return typeof filter === 'string' && commands.some(item => item.group === filter) ? filter : ''
+        return resolveGroupFilter(this.config.store.aiTerminal.senderGroupFilter, commands)
     }
 
     private getActiveGroup (): string|undefined {
@@ -2504,31 +2156,11 @@ export class AITerminalPanel {
         return filter && filter !== UNGROUPED_FILTER ? filter : undefined
     }
 
-    private matchesGroupFilter (item: SavedSenderCommand, filter: string): boolean {
-        if (!filter) {
-            return true
-        }
-        return filter === UNGROUPED_FILTER ? !item.group : item.group === filter
-    }
-
     private setGroupFilter (filter: string): void {
         this.config.store.aiTerminal.senderGroupFilter = filter
         this.savedCommandTabs.scrollLeft = 0
         this.renderSavedCommandTabs()
         void this.config.save()
-    }
-
-    /** Index right after the last tag of the group; ungrouped tags go to the end */
-    private getGroupEndIndex (commands: SavedSenderCommand[], group: string|undefined): number {
-        if (!group) {
-            return commands.length
-        }
-        for (let index = commands.length - 1; index >= 0; index--) {
-            if (commands[index].group === group) {
-                return index + 1
-            }
-        }
-        return commands.length
     }
 
     private renderSavedCommandTabs (): void {
@@ -2539,7 +2171,7 @@ export class AITerminalPanel {
         const previousScrollLeft = this.savedCommandTabs.scrollLeft
         this.savedCommandTabs.replaceChildren()
         savedCommands.forEach((item, index) => {
-            if (!this.matchesGroupFilter(item, filter)) {
+            if (!matchesGroupFilter(item, filter)) {
                 return
             }
             const tab = document.createElement('button')
@@ -2548,9 +2180,9 @@ export class AITerminalPanel {
             tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
             if (item.group) {
                 tab.classList.add('has-group')
-                this.applyGroupColor(tab, this.getGroupColor(item.group))
+                applyGroupColor(tab, this.getGroupColor(item.group))
             }
-            tab.textContent = this.buildSavedCommandLabel(item.name || item.command)
+            tab.textContent = buildSavedCommandLabel(item.name ?? item.command)
             tab.title = [
                 item.name,
                 item.command,
@@ -2577,7 +2209,7 @@ export class AITerminalPanel {
     }
 
     private renderSavedGroupBar (commands: SavedSenderCommand[], filter: string): void {
-        const groups = this.getSavedGroups(commands)
+        const groups = getSavedGroups(commands)
         this.savedGroupBar.replaceChildren()
         this.savedGroupBar.hidden = !groups.length
         this.savedGroupBar.parentElement?.classList.toggle('has-groups', groups.length > 0)
@@ -2598,7 +2230,7 @@ export class AITerminalPanel {
             badge.textContent = String(count)
             element.append(text, badge)
             const color = value === '' ? ALL_GROUPS_COLOR : value === UNGROUPED_FILTER ? GROUP_COLORS.gray.hex : this.getGroupColor(value)
-            this.applyGroupColor(element, color)
+            applyGroupColor(element, color)
             element.addEventListener('click', () => this.setGroupFilter(value))
             this.savedGroupBar.appendChild(element)
             return element
@@ -2664,202 +2296,31 @@ export class AITerminalPanel {
 
     /** A palette name or a custom #rrggbb color */
     private getChosenGroupColor (group: string): string|null {
-        const chosen = this.config.store.aiTerminal.senderGroupColors?.[group]
-        if (typeof chosen !== 'string') {
-            return null
-        }
-        return chosen in GROUP_COLORS || /^#[0-9a-f]{6}$/i.test(chosen) ? chosen : null
+        return chosenGroupColor(this.config.store.aiTerminal.senderGroupColors, group)
     }
 
-    /** The chosen color, or an automatic one */
     private getGroupColor (group: string): string {
-        const chosen = this.getChosenGroupColor(group)
-        if (chosen) {
-            return chosen.startsWith('#') ? chosen.toLowerCase() : GROUP_COLORS[chosen].hex
-        }
-        return this.getAutomaticGroupColors().get(group) ?? GROUP_COLORS[AUTO_GROUP_COLORS[this.hashGroupName(group) % AUTO_GROUP_COLORS.length]].hex
+        this.automaticGroupColors ??= automaticGroupColors(getSavedGroups(this.getSavedSenderCommands()), this.config.store.aiTerminal.senderGroupColors)
+        return groupColorHex(group, this.config.store.aiTerminal.senderGroupColors, this.automaticGroupColors)
     }
 
-    /**
-     * Automatic colors avoid the colors already in use: groups are taken in name order (not display order,
-     * so dragging does not recolor them), each gets its name-based color or the next free one.
-     */
-    private getAutomaticGroupColors (): Map<string, string> {
-        if (this.automaticGroupColors) {
-            return this.automaticGroupColors
-        }
-        const groups = this.getSavedGroups(this.getSavedSenderCommands())
-        const used = new Set(groups.map(group => this.getChosenGroupColor(group)).filter((color): color is string => !!color))
-        const colors = new Map<string, string>()
-        for (const group of [...groups].sort()) {
-            if (this.getChosenGroupColor(group)) {
-                continue
-            }
-            const start = this.hashGroupName(group) % AUTO_GROUP_COLORS.length
-            const free = AUTO_GROUP_COLORS.map((_, offset) => AUTO_GROUP_COLORS[(start + offset) % AUTO_GROUP_COLORS.length]).find(key => !used.has(key))
-            const key = free ?? AUTO_GROUP_COLORS[start]
-            used.add(key)
-            colors.set(group, GROUP_COLORS[key].hex)
-        }
-        this.automaticGroupColors = colors
-        return colors
-    }
-
-    private hashGroupName (group: string): number {
-        let hash = 0
-        for (const char of group) {
-            hash = hash * 31 + (char.codePointAt(0) ?? 0) >>> 0
-        }
-        return hash
-    }
-
-    /** Sets the color, its translucent border / hover tints and a readable text color for the filled chip */
-    private applyGroupColor (element: HTMLElement, hex: string): void {
-        const [red, green, blue] = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16))
-        const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
-        // A dark custom color is lightened for text and bars, which sit on the dark panel background
-        const accent = luminance < 0.4
-            ? `rgb(${[red, green, blue].map(value => Math.round(value + (255 - value) * 0.55)).join(', ')})`
-            : hex
-        element.style.setProperty('--ai-group-color', hex)
-        element.style.setProperty('--ai-group-accent', accent)
-        element.style.setProperty('--ai-group-border', luminance < 0.4 ? accent : `rgba(${red}, ${green}, ${blue}, 0.5)`)
-        element.style.setProperty('--ai-group-tint', `rgba(${red}, ${green}, ${blue}, ${luminance < 0.4 ? 0.45 : 0.14})`)
-        element.style.setProperty('--ai-group-on', luminance > 0.5 ? '#10151b' : '#ffffff')
-    }
-
-    /** Palette swatches plus the system color picker and a hex field */
     private openGroupColorDialog (group: string): void {
-        this.closeSenderTagEditor()
-        let selected = this.getGroupColor(group)
-        const overlay = document.createElement('div')
-        overlay.className = 'ai-sender-tag-editor-overlay'
-        this.guardTerminalEvents(overlay)
-        const editor = document.createElement('div')
-        editor.className = 'ai-sender-tag-editor'
-        editor.setAttribute('role', 'dialog')
-        const title = document.createElement('div')
-        title.className = 'ai-sender-tag-editor-title'
-        title.textContent = `Color of "${group}"`
-
-        const chosen = this.getChosenGroupColor(group)
-        const current = document.createElement('div')
-        current.className = 'ai-color-current'
-        current.textContent = `Current: ${!chosen ? 'Automatic' : chosen.startsWith('#') ? `Custom ${chosen}` : GROUP_COLORS[chosen].label}`
-
-        const preview = document.createElement('span')
-        preview.className = 'ai-saved-group-chip is-active ai-color-preview'
-        preview.textContent = group
-
-        const swatches = document.createElement('div')
-        swatches.className = 'ai-color-swatches'
-        const picker = document.createElement('input')
-        picker.type = 'color'
-        picker.className = 'ai-color-picker'
-        picker.title = 'Pick any color'
-        const hexInput = document.createElement('input')
-        hexInput.type = 'text'
-        hexInput.className = 'form-control ai-color-hex'
-        hexInput.placeholder = '#rrggbb'
-        hexInput.maxLength = 7
-        const error = document.createElement('div')
-        error.className = 'ai-sender-tag-editor-error'
-
-        const select = (hex: string) => {
-            selected = hex.toLowerCase()
-            picker.value = selected
-            hexInput.value = selected
-            error.textContent = ''
-            this.applyGroupColor(preview, selected)
-            for (const swatch of Array.from(swatches.children)) {
-                swatch.classList.toggle('is-selected', (swatch as HTMLElement).dataset.hex === selected)
-            }
-        }
-        const restorePreview = () => this.applyGroupColor(preview, selected)
-        // Swatches, the picker and the hex field only select; Confirm applies. Hovering a swatch previews it.
-        for (const color of Object.values(GROUP_COLORS)) {
-            const swatch = document.createElement('button')
-            swatch.type = 'button'
-            swatch.className = 'ai-color-swatch'
-            swatch.dataset.hex = color.hex
-            swatch.title = color.label
-            swatch.style.background = color.hex
-            swatch.addEventListener('mouseenter', () => this.applyGroupColor(preview, color.hex))
-            swatch.addEventListener('mouseleave', restorePreview)
-            swatch.addEventListener('click', () => select(color.hex))
-            swatches.appendChild(swatch)
-        }
-        picker.addEventListener('input', () => select(picker.value))
-        hexInput.addEventListener('input', () => {
-            const value = hexInput.value.trim()
-            const hex = value.startsWith('#') ? value : `#${value}`
-            if (/^#[0-9a-f]{6}$/i.test(hex)) {
-                select(hex)
-                hexInput.value = value
-            }
-        })
-        const customRow = document.createElement('label')
-        customRow.className = 'ai-sender-tag-editor-label ai-color-custom'
-        customRow.append('Custom', picker, hexInput)
-
-        const apply = () => {
-            const value = hexInput.value.trim()
-            const hex = (value.startsWith('#') ? value : `#${value}`).toLowerCase()
-            if (!/^#[0-9a-f]{6}$/.test(hex)) {
-                error.textContent = 'Enter a color as #rrggbb.'
-                hexInput.focus()
-                return
-            }
-            // A palette color is stored by name, anything else as #rrggbb
-            const paletteKey = Object.keys(GROUP_COLORS).find(key => GROUP_COLORS[key].hex === hex)
-            this.closeSenderTagEditor()
-            void this.setGroupColor(group, paletteKey ?? hex)
-        }
-        const actions = document.createElement('div')
-        actions.className = 'ai-sender-tag-editor-actions'
-        const automatic = this.button('Automatic', 'secondary', () => {
-            this.closeSenderTagEditor()
-            void this.setGroupColor(group, null)
-        })
-        automatic.classList.add('ai-tag-delete-button')
-        automatic.title = 'Pick a color that no other group uses'
-        actions.append(automatic, this.button('Cancel', 'secondary', () => this.closeSenderTagEditor()), this.button('Confirm', 'primary', apply))
-
-        editor.append(title, current, preview, swatches, customRow, error, actions)
-        overlay.appendChild(editor)
-        overlay.addEventListener('mousedown', event => {
-            if (event.target === overlay) {
+        this.showDialog(buildGroupColorDialog({
+            group,
+            color: this.getGroupColor(group),
+            chosen: this.getChosenGroupColor(group),
+            close: () => this.closeSenderTagEditor(),
+            apply: color => {
                 this.closeSenderTagEditor()
-            }
-        })
-        overlay.addEventListener('keydown', event => {
-            if (event.key === 'Escape') {
-                event.preventDefault()
-                this.closeSenderTagEditor()
-            } else if (event.key === 'Enter' && !event.isComposing) {
-                event.preventDefault()
-                apply()
-            }
-        })
-        select(selected)
-        this.senderTagEditor = overlay
-        document.body.appendChild(overlay)
-        requestAnimationFrame(() => hexInput.focus())
+                void this.setGroupColor(group, color)
+            },
+        }))
     }
 
     private async setGroupColor (group: string, color: string|null): Promise<void> {
-        this.config.store.aiTerminal.senderGroupColors = this.withGroupColor(group, color)
+        this.config.store.aiTerminal.senderGroupColors = withGroupColor(this.config.store.aiTerminal.senderGroupColors, group, color)
         await this.config.save()
         this.renderSavedCommandTabs()
-    }
-
-    /** senderGroupColors with the color of one group set (or removed with null) */
-    private withGroupColor (group: string, color: string|null): Record<string, string> {
-        const colors = Object.entries(this.config.store.aiTerminal.senderGroupColors ?? {}).filter(([name]) => name !== group)
-        if (color) {
-            colors.push([group, color])
-        }
-        return Object.fromEntries(colors) as Record<string, string>
     }
 
     /** Puts every command of the group into the Sender, one per line, ready for Send all */
@@ -2878,7 +2339,7 @@ export class AITerminalPanel {
 
     private openRenameGroupDialog (group: string): void {
         this.openFormDialog('Rename group', [{ label: 'Group name', value: group }], 'Rename', ([value]) => {
-            const name = this.normalizeGroupName(value)
+            const name = normalizeGroupName(value)
             if (!name) {
                 return false
             }
@@ -2900,7 +2361,7 @@ export class AITerminalPanel {
         }
         // The color moves with the name; when merging into an existing group, that group keeps its color
         const fromColor = this.getChosenGroupColor(from)
-        const colors = this.withGroupColor(from, null)
+        const colors = withGroupColor(this.config.store.aiTerminal.senderGroupColors, from, null)
         if (fromColor && !this.getChosenGroupColor(to)) {
             colors[to] = fromColor
         }
@@ -2928,7 +2389,7 @@ export class AITerminalPanel {
                 delete item.group
             }
         }
-        this.config.store.aiTerminal.senderGroupColors = this.withGroupColor(group, null)
+        this.config.store.aiTerminal.senderGroupColors = withGroupColor(this.config.store.aiTerminal.senderGroupColors, group, null)
         await this.setSavedSenderCommands(commands)
     }
 
@@ -3077,7 +2538,7 @@ export class AITerminalPanel {
         } else {
             delete item.group
         }
-        const insertAt = this.getGroupEndIndex(commands, group)
+        const insertAt = getGroupEndIndex(commands, group)
         commands.splice(insertAt, 0, item)
         this.selectedSavedCommandIndex = insertAt
         await this.setSavedSenderCommands(commands)
@@ -3093,15 +2554,9 @@ export class AITerminalPanel {
         if (first < 0) {
             return
         }
-        rest.splice(before ? first : this.getGroupEndIndex(rest, target), 0, ...moving)
+        rest.splice(before ? first : getGroupEndIndex(rest, target), 0, ...moving)
         this.selectedSavedCommandIndex = selected ? rest.indexOf(selected) : -1
         await this.setSavedSenderCommands(rest)
-    }
-
-    private buildSavedCommandLabel (value: string): string {
-        const firstLine = value.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? 'Command'
-        const characters = Array.from(firstLine)
-        return characters.length > 16 ? `${characters.slice(0, 16).join('')}...` : firstLine
     }
 
     private getSenderCommandInsertMode (): 'replace'|'append' {
@@ -3180,6 +2635,8 @@ export class AITerminalPanel {
     }
 
     private observeDynamicLayout (): void {
+        // jsdom, which runs the tests, has no ResizeObserver
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!window.ResizeObserver) {
             this.scheduleDynamicLayoutUpdate()
             return
@@ -3233,10 +2690,7 @@ export class AITerminalPanel {
     }
 
     private clearLatestSessionOutput (): void {
-        this.recentOutputLines = []
-        this.pendingOutput = ''
-        this.currentInputLine = ''
-        this.skipNextEmptyInputOutputLine = false
+        this.capture.clear()
         this.output.value = ''
         this.latestOutputDetails.open = false
         this.render()
@@ -3270,7 +2724,7 @@ export class AITerminalPanel {
     }
 
     private async clearReferenceFolder (): Promise<void> {
-        if (this.runHandle || !this.referenceFolder) {
+        if (this.runHandle !== null || !this.referenceFolder) {
             return
         }
         if (!await this.confirmSessionResetForReferenceFolderChange()) {
@@ -3324,12 +2778,8 @@ export class AITerminalPanel {
     }
 
     private updateLatestOutputFromEditor (): void {
-        this.recentOutputLines = this.output.value ? this.output.value.split(/\r?\n/) : []
-        this.pendingOutput = ''
-        this.currentInputLine = ''
-        this.skipNextEmptyInputOutputLine = false
-        this.trimRecentOutput()
-        this.latestOutputMeta.textContent = this.formatLineCount(this.recentOutputLines.length)
+        this.capture.replaceLines(this.output.value ? this.output.value.split(/\r?\n/) : [])
+        this.latestOutputMeta.textContent = this.formatLineCount(this.capture.lines.length)
     }
 
     private requestTerminalRefit (): void {
@@ -3353,51 +2803,6 @@ export class AITerminalPanel {
         return distanceFromBottom < 16
     }
 
-    private guardTerminalEvents (element: HTMLElement): void {
-        element.tabIndex = -1
-        const stopPropagation = (event: Event) => event.stopPropagation()
-        element.addEventListener('mousedown', event => {
-            this.focusEventSurface(element, event)
-            event.stopPropagation()
-        })
-        for (const eventName of ['click', 'mouseup', 'dblclick', 'contextmenu']) {
-            element.addEventListener(eventName, stopPropagation)
-        }
-        for (const eventName of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'copy', 'cut', 'paste']) {
-            element.addEventListener(eventName, stopPropagation)
-        }
-        element.addEventListener('wheel', stopPropagation, { passive: true })
-        element.addEventListener('touchmove', stopPropagation, { passive: true })
-    }
-
-    private focusEventSurface (surface: HTMLElement, event: MouseEvent): void {
-        const target = event.target
-        if (!(target instanceof HTMLElement)) {
-            return
-        }
-        if (target.closest('textarea, input, select, button, a, [contenteditable="true"]')) {
-            return
-        }
-        surface.focus({ preventScroll: true })
-    }
-
-    private textarea (placeholder: string, rows: number): HTMLTextAreaElement {
-        const element = document.createElement('textarea')
-        element.className = 'form-control'
-        element.rows = rows
-        element.placeholder = placeholder
-        return element
-    }
-
-    private button (label: string, variant: 'primary'|'success'|'secondary'|'danger', click: (event: MouseEvent) => void): HTMLButtonElement {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = `btn btn-sm btn-${variant === 'secondary' ? 'outline-secondary' : variant}`
-        button.textContent = label
-        button.addEventListener('click', click)
-        return button
-    }
-
     private createRunningIndicator (): HTMLElement {
         const indicator = document.createElement('span')
         indicator.className = 'ai-running-indicator'
@@ -3416,40 +2821,12 @@ export class AITerminalPanel {
         return indicator
     }
 
-    private trimRecentOutput (): void {
-        const excess = this.recentOutputLines.length - this.getSessionOutputLimit()
-        if (excess > 0) {
-            this.recentOutputLines.splice(0, excess)
-        }
-    }
-
     private getSessionOutputLimit (): number {
         const value = Number(this.config.store.aiTerminal.maxSessionOutputLines)
         if (!Number.isFinite(value) || value < 1) {
             return 100
         }
         return Math.floor(value)
-    }
-
-    private getRecentOutputText (): string {
-        return this.recentOutputLines.join('\n')
-    }
-
-    private redactSensitiveText (text: string): string {
-        return text
-            .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[redacted-private-key]')
-            .replace(/(authorization\s*:\s*bearer\s+)[^\s'"]+/gi, '$1[redacted]')
-            .replace(/\b(sk-[A-Za-z0-9_-]{20,})\b/g, '[redacted-openai-key]')
-            .replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[redacted-github-token]')
-            .replace(/\b(AKIA[0-9A-Z]{16})\b/g, '[redacted-aws-key]')
-            .replace(/\b(xox[baprs]-[A-Za-z0-9-]{20,})\b/g, '[redacted-slack-token]')
-            .replace(/:\/\/([^:\s/@]+):([^@\s]+)@/g, '://[redacted]@')
-            // name=value, name: value, "name": "value", sae_password=..., wpa_passphrase=...
-            .replace(SECRET_QUOTED_PATTERN, '$1$2$3[redacted]$3')
-            .replace(SECRET_PLAIN_PATTERN, '$1$2[redacted]')
-            // OpenWrt Wi-Fi keys: `uci show` (wireless.x.key='...') and /etc/config (option key '...')
-            .replace(/(\.key=|\boption\s+key\s+)(["'])(?:(?!\2).)*\2/gi, '$1$2[redacted]$2')
-            .replace(/(\.key=)([^\s'"]+)/gi, '$1[redacted]')
     }
 
     private countOutputLines (output: string): number {
@@ -3461,130 +2838,6 @@ export class AITerminalPanel {
             return 'empty'
         }
         return lineCount === 1 ? '1 line' : `${lineCount} lines`
-    }
-
-    private getDisplayOutputLines (): string[] {
-        const pendingLine = this.normalizeOutputLine(this.pendingOutput)
-        if (!pendingLine || (this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts())) {
-            return this.recentOutputLines
-        }
-        return [...this.recentOutputLines, pendingLine]
-    }
-
-    private handleTerminalSubmit (allowEmptyInputSuppression = true): boolean {
-        const hasInput = this.currentInputLine.trim().length > 0
-        if (this.shouldIgnoreEmptyEnterPrompts() && !hasInput && allowEmptyInputSuppression) {
-            this.skipNextEmptyInputOutputLine = true
-        } else {
-            this.skipNextEmptyInputOutputLine = false
-        }
-        this.currentInputLine = ''
-        return hasInput
-    }
-
-    private shouldIgnoreEmptyEnterPrompts (): boolean {
-        return Boolean(this.config.store.aiTerminal.ignoreEmptyEnterPrompts)
-    }
-
-    private trackTerminalInput (input: string): void {
-        const text = input
-            .replace(/\x1b\[200~/g, '')
-            .replace(/\x1b\[201~/g, '')
-        let sawCommandSubmitInThisInput = false
-
-        for (let index = 0; index < text.length; index++) {
-            const char = text[index]
-
-            if (char === '\x1b') {
-                index = this.skipEscapeSequence(text, index)
-                continue
-            }
-
-            if (char === '\r' || char === '\n') {
-                if (char === '\r' && text[index + 1] === '\n') {
-                    index++
-                }
-                const hadInput = this.handleTerminalSubmit(!sawCommandSubmitInThisInput)
-                sawCommandSubmitInThisInput ||= hadInput
-                continue
-            }
-
-            this.currentInputLine = this.applyInputCharacter(this.currentInputLine, char)
-            if (this.currentInputLine.trim().length > 0) {
-                this.skipNextEmptyInputOutputLine = false
-            }
-        }
-    }
-
-    private appendOutputLine (line: string): void {
-        const normalizedLine = this.normalizeOutputLine(line)
-        if (!normalizedLine.trim()) {
-            return
-        }
-
-        if (this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts()) {
-            this.skipNextEmptyInputOutputLine = false
-            return
-        }
-
-        this.skipNextEmptyInputOutputLine = false
-        this.recentOutputLines.push(normalizedLine)
-    }
-
-    private afterCarriageReturn (line: string): string {
-        const index = line.lastIndexOf('\r')
-        return index === -1 ? line : line.slice(index + 1)
-    }
-
-    private flushPendingOutput (): void {
-        if (!this.pendingOutput.trim()) {
-            this.pendingOutput = ''
-            return
-        }
-
-        this.appendOutputLine(this.pendingOutput)
-        this.pendingOutput = ''
-        this.trimRecentOutput()
-    }
-
-    private normalizeOutputLine (line: string): string {
-        return stripTerminalControlSequences(line).replace(/\s+$/g, '')
-    }
-
-    private skipEscapeSequence (text: string, startIndex: number): number {
-        if (text[startIndex + 1] !== '[') {
-            return startIndex
-        }
-
-        let index = startIndex + 2
-        while (index < text.length && !/[@-~]/.test(text[index])) {
-            index++
-        }
-        return Math.min(index, text.length - 1)
-    }
-
-    private applyInputCharacter (current: string, char: string): string {
-        if (char === '\b' || char === '\x7f') {
-            return current.slice(0, -1)
-        }
-
-        if (char === '\u0015') {
-            return ''
-        }
-
-        if (char === '\u0017') {
-            return current.replace(/\S+\s*$/, '')
-        }
-
-        if (char === '\u0003') {
-            return ''
-        }
-
-        if (char < ' ' && char !== '\t') {
-            return current
-        }
-
-        return `${current}${char}`
     }
 
 }
