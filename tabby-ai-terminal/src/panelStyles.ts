@@ -119,20 +119,31 @@ export const AI_TERMINAL_PANEL_STYLES = `
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
     gap: 10px;
-    align-items: center;
+    align-items: start;
 }
 .ai-sender-heading > .ai-panel-title {
     flex: 0 0 auto;
+    min-height: 28px;
+    align-items: center;
 }
+/* Groups, then tags with + Save; the tag row wraps below the groups when the heading is too narrow */
 .ai-saved-command-toolbar {
     width: 100%;
     max-width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    align-items: center;
+    overflow: hidden;
+}
+.ai-saved-command-row {
+    flex: 1 1 200px;
     min-width: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 6px;
     align-items: center;
-    overflow: hidden;
 }
 .ai-saved-command-tabs {
     width: 100%;
@@ -449,6 +460,73 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-sender-next.is-notice {
     color: #ffc107;
     font-family: inherit;
+}
+.ai-saved-group-bar {
+    flex: 0 1 auto;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 28px;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    overscroll-behavior-x: contain;
+}
+.ai-saved-group-bar[hidden] {
+    display: none;
+}
+.ai-saved-group-chip {
+    flex: 0 0 auto;
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 199, 94, 0.45);
+    background: transparent;
+    color: #ffd88a;
+    font-size: calc(var(--ai-terminal-font-size) * 0.92);
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.ai-saved-group-chip:hover {
+    background: rgba(255, 199, 94, 0.12);
+}
+.ai-saved-group-chip.is-active {
+    color: #1b1406;
+    background: #ffc75e;
+    border-color: #ffc75e;
+}
+.ai-saved-group-chip.is-ungrouped .ai-saved-group-name {
+    font-style: italic;
+}
+.ai-saved-group-chip.is-empty {
+    display: none;
+}
+.ai-saved-group-bar.is-dragging-tag .ai-saved-group-chip.is-empty {
+    display: inline-flex;
+}
+.ai-saved-group-count {
+    font-size: 0.82em;
+    opacity: 0.7;
+}
+.ai-saved-group-chip.is-drop-target {
+    box-shadow: 0 0 0 2px #8fd3ff;
+}
+.ai-saved-command-tab.is-dragging,
+.ai-saved-group-chip.is-dragging {
+    opacity: 0.45;
+}
+.ai-saved-command-tab.is-drop-before,
+.ai-saved-group-chip.is-drop-before {
+    box-shadow: inset 3px 0 0 #8fd3ff;
+}
+.ai-saved-command-tab.is-drop-after,
+.ai-saved-group-chip.is-drop-after {
+    box-shadow: inset -3px 0 0 #8fd3ff;
 }
 .ai-saved-command-hint {
     align-self: center;

@@ -1,6 +1,6 @@
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { Subscription } from 'rxjs'
-import { ConfigService, PlatformService } from 'tabby-core'
+import { ConfigService, MenuItemOptions, PlatformService } from 'tabby-core'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
 import { AIProviderRunnerService, AIProviderRunHandle, AIToolPermissionRequest } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
@@ -10,6 +10,9 @@ const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
 const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 const MAX_SAVED_SENDER_COMMANDS = 100
+/** senderGroupFilter value that shows the tags without a group */
+const UNGROUPED_FILTER = '__ungrouped__'
+let tagGroupListSeq = 0
 const DEFAULT_PROMPT_PATTERN = '[#$>]\\s*$'
 const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
@@ -22,6 +25,7 @@ const CLAUDE_MODE_LABELS: Partial<Record<string, string>> = { plan: 'Plan', manu
 interface SavedSenderCommand {
     name?: string
     command: string
+    group?: string
 }
 
 interface PendingPermission {
@@ -100,6 +104,7 @@ export class AITerminalPanel {
     private runningTimer: ReturnType<typeof setInterval>|null = null
     private pendingPermissions: PendingPermission[] = []
     private savedCommandTabs: HTMLElement
+    private savedGroupBar: HTMLElement
     private draft: HTMLTextAreaElement
     private senderTargetElement: HTMLElement|null = null
     private senderNextPreview: HTMLElement
@@ -110,6 +115,7 @@ export class AITerminalPanel {
     private senderBusy = false
     private senderStopRequested = false
     private senderForceOpen = false
+    private senderPointerDown = false
     private senderNotice = ''
     private senderProgress = ''
     private outputLineSeq = 0
@@ -140,6 +146,8 @@ export class AITerminalPanel {
     private lastFocusRefreshAt = 0
     private environmentRefreshPromptShown = false
     private selectedSavedCommandIndex = -1
+    private dragTagIndex: number|null = null
+    private dragGroup: string|null = null
     private senderTagEditor: HTMLElement|null = null
     private statusSubscription: Subscription
     private configSubscription: Subscription|null = null
@@ -368,13 +376,36 @@ export class AITerminalPanel {
             const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
             this.savedCommandTabs.scrollLeft += delta
         }, { passive: false })
+        this.savedGroupBar = document.createElement('div')
+        this.savedGroupBar.className = 'ai-saved-group-bar'
+        this.savedGroupBar.hidden = true
+        this.savedGroupBar.addEventListener('wheel', event => {
+            if (this.savedGroupBar.scrollWidth <= this.savedGroupBar.clientWidth) {
+                return
+            }
+            event.preventDefault()
+            this.savedGroupBar.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+        }, { passive: false })
         this.draft = this.textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
         this.draft.addEventListener('input', () => this.updateSenderState())
         this.draft.addEventListener('focus', () => this.updateSenderState())
-        this.draft.addEventListener('blur', () => {
+        this.draft.addEventListener('blur', event => {
+            // Clicking tags, groups or buttons of the sender keeps it open, so they do not move under the pointer
+            const related = event.relatedTarget
+            if (this.senderPointerDown || related instanceof Node && this.senderElement.contains(related)) {
+                this.senderForceOpen = true
+                return
+            }
             this.senderForceOpen = false
             this.updateSenderState()
         })
+        this.senderElement.addEventListener('mousedown', () => {
+            this.senderPointerDown = true
+            setTimeout(() => {
+                this.senderPointerDown = false
+            })
+        }, true)
+        document.addEventListener('mousedown', this.collapseSenderOnOutsideClick, true)
         this.renderSavedCommandTabs()
         this.configSubscription = this.config.changed$.subscribe(() => {
             this.renderSavedCommandTabs()
@@ -473,7 +504,12 @@ export class AITerminalPanel {
                 this.senderStopButton,
             ]),
         )
-        this.senderElement.addEventListener('click', () => {
+        this.senderElement.addEventListener('click', event => {
+            // Tags and groups work in the collapsed sender without expanding it. The path is
+            // recorded at dispatch, so it still holds the heading after a click re-renders the tags
+            if (event.composedPath().some(node => node instanceof Element && node.classList.contains('ai-sender-heading'))) {
+                return
+            }
             if (this.tab.element.nativeElement.classList.contains('ai-terminal-sender-collapsed')) {
                 this.senderForceOpen = true
                 this.updateSenderState()
@@ -510,6 +546,7 @@ export class AITerminalPanel {
         this.statusSubscription.unsubscribe()
         this.configSubscription?.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
+        document.removeEventListener('mousedown', this.collapseSenderOnOutsideClick, true)
         this.tab.element.nativeElement.classList.remove('ai-terminal-panel-visible')
         this.tab.element.nativeElement.classList.remove('ai-terminal-sender-visible')
         this.senderElement.remove()
@@ -995,6 +1032,19 @@ export class AITerminalPanel {
     private setAISessionID (sessionID: string): void {
         this.aiSessionID = sessionID
         this.renderProviderIdentity()
+    }
+
+    /** Collapses a sender that was kept open for tag or group clicks once the user clicks elsewhere */
+    private collapseSenderOnOutsideClick = (event: MouseEvent): void => {
+        if (!this.senderForceOpen || document.activeElement === this.draft) {
+            return
+        }
+        const target = event.target
+        if (target instanceof Element && (this.senderElement.contains(target) || target.closest('.ai-sender-tag-editor-overlay'))) {
+            return
+        }
+        this.senderForceOpen = false
+        this.updateSenderState()
     }
 
     private refreshAfterFocus = (): void => {
@@ -1927,68 +1977,89 @@ export class AITerminalPanel {
     private createSavedCommandToolbar (): HTMLElement {
         const toolbar = document.createElement('div')
         toolbar.className = 'ai-saved-command-toolbar'
+        toolbar.classList.toggle('has-groups', !this.savedGroupBar.hidden)
+
+        const row = document.createElement('div')
+        row.className = 'ai-saved-command-row'
 
         const addButton = this.button('+ Save', 'secondary', () => this.openSenderTagEditor())
         addButton.classList.add('ai-saved-command-control', 'is-add')
         addButton.title = 'Save the Sender content as a tag. Use {{name}} for values to fill in when inserting.'
 
-        toolbar.append(this.savedCommandTabs, addButton)
+        row.append(this.savedCommandTabs, addButton)
+        toolbar.append(this.savedGroupBar, row)
         return toolbar
     }
 
     private insertSavedCommandIntoDraft (command: string, index: number): void {
-        const names = [...new Set([...command.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)].map(match => match[1]))]
-        if (names.length) {
-            this.openVariableDialog(names, values => {
-                const filled = command.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_, name: string) => values[name])
-                this.insertResolvedCommand(filled, index)
-            })
+        this.resolveVariables([command], ([filled]) => this.insertResolvedCommand(filled, index))
+    }
+
+    /** Fills the {{name}} placeholders of the commands, asking for all values in one dialog */
+    private resolveVariables (commands: string[], done: (filled: string[]) => void): void {
+        const pattern = /\{\{\s*([\w.-]+)\s*\}\}/g
+        const names = [...new Set(commands.flatMap(command => [...command.matchAll(pattern)].map(match => match[1])))]
+        if (!names.length) {
+            done(commands)
             return
         }
-        this.insertResolvedCommand(command, index)
+        this.openVariableDialog(names, values => {
+            done(commands.map(command => command.replace(pattern, (_, name: string) => values[name])))
+        })
     }
 
     /** Asks for the {{name}} values of a saved tag; the last values are remembered */
     private openVariableDialog (names: string[], done: (values: Record<string, string>) => void): void {
-        this.closeSenderTagEditor()
         const remembered: Partial<Record<string, string>> = { ...this.config.store.aiTerminal.senderVariables ?? {} }
+        const fields = names.map(name => ({ label: name, value: remembered[name] ?? '' }))
+        this.openFormDialog('Fill in values', fields, 'Insert', inputs => {
+            const values: Record<string, string> = {}
+            names.forEach((name, index) => {
+                values[name] = inputs[index]
+            })
+            this.config.store.aiTerminal.senderVariables = { ...remembered, ...values }
+            void this.config.save()
+            this.closeSenderTagEditor()
+            done(values)
+            return true
+        })
+    }
+
+    /** Modal with one text input per field; submit returns false to keep the dialog open */
+    private openFormDialog (title: string, fields: { label: string, value: string }[], confirmLabel: string, submit: (values: string[]) => boolean): void {
+        this.closeSenderTagEditor()
         const overlay = document.createElement('div')
         overlay.className = 'ai-sender-tag-editor-overlay'
         this.guardTerminalEvents(overlay)
         const editor = document.createElement('div')
         editor.className = 'ai-sender-tag-editor'
         editor.setAttribute('role', 'dialog')
-        const title = document.createElement('div')
-        title.className = 'ai-sender-tag-editor-title'
-        title.textContent = 'Fill in values'
-        editor.appendChild(title)
-        const inputs = names.map(name => {
+        const titleElement = document.createElement('div')
+        titleElement.className = 'ai-sender-tag-editor-title'
+        titleElement.textContent = title
+        editor.appendChild(titleElement)
+        const inputs = fields.map(field => {
             const label = document.createElement('label')
             label.className = 'ai-sender-tag-editor-label'
-            label.textContent = name
+            label.textContent = field.label
             const input = document.createElement('input')
             input.type = 'text'
             input.className = 'form-control'
-            input.value = remembered[name] ?? ''
+            input.value = field.value
             label.appendChild(input)
             editor.appendChild(label)
             return input
         })
-        const submit = () => {
-            const values: Record<string, string> = {}
-            names.forEach((name, index) => {
-                values[name] = inputs[index].value
-            })
-            this.config.store.aiTerminal.senderVariables = { ...remembered, ...values }
-            void this.config.save()
-            this.closeSenderTagEditor()
-            done(values)
+        const confirm = () => {
+            if (submit(inputs.map(input => input.value))) {
+                this.closeSenderTagEditor()
+            }
         }
         const actions = document.createElement('div')
         actions.className = 'ai-sender-tag-editor-actions'
         actions.append(
             this.button('Cancel', 'secondary', () => this.closeSenderTagEditor()),
-            this.button('Insert', 'primary', submit),
+            this.button(confirmLabel, 'primary', confirm),
         )
         editor.appendChild(actions)
         overlay.appendChild(editor)
@@ -2003,21 +2074,28 @@ export class AITerminalPanel {
                 this.closeSenderTagEditor()
             } else if (event.key === 'Enter') {
                 event.preventDefault()
-                submit()
+                confirm()
             }
         })
         this.senderTagEditor = overlay
         document.body.appendChild(overlay)
-        requestAnimationFrame(() => inputs[0].focus())
+        requestAnimationFrame(() => {
+            inputs[0].focus()
+            inputs[0].select()
+        })
     }
 
     private insertResolvedCommand (command: string, index: number): void {
         this.selectedSavedCommandIndex = index
+        this.insertIntoDraft(command)
+    }
+
+    private insertIntoDraft (text: string): void {
         if (this.getSenderCommandInsertMode() === 'append') {
             const current = this.draft.value.trimEnd()
-            this.draft.value = current ? `${current}\n${command}` : command
+            this.draft.value = current ? `${current}\n${text}` : text
         } else {
-            this.draft.value = command
+            this.draft.value = text
         }
         this.renderSavedCommandTabs()
         this.senderNotice = ''
@@ -2025,13 +2103,17 @@ export class AITerminalPanel {
         this.updateSenderState()
     }
 
-    private async saveSenderCommand (name: string, command: string, editIndex: number|null): Promise<void> {
+    private async saveSenderCommand (name: string, command: string, group: string, editIndex: number|null): Promise<void> {
         const savedCommands = this.getSavedSenderCommands()
         const item: SavedSenderCommand = {
             command: command.trim(),
         }
         if (name.trim()) {
             item.name = name.trim()
+        }
+        const groupName = this.normalizeGroupName(group)
+        if (groupName) {
+            item.group = groupName
         }
 
         if (editIndex !== null && editIndex >= 0 && editIndex < savedCommands.length) {
@@ -2041,8 +2123,14 @@ export class AITerminalPanel {
             if (savedCommands.length >= MAX_SAVED_SENDER_COMMANDS) {
                 savedCommands.splice(0, savedCommands.length - MAX_SAVED_SENDER_COMMANDS + 1)
             }
-            savedCommands.push(item)
-            this.selectedSavedCommandIndex = savedCommands.length - 1
+            // A new tag goes right after the other tags of its group
+            const insertAt = this.getGroupEndIndex(savedCommands, item.group)
+            savedCommands.splice(insertAt, 0, item)
+            this.selectedSavedCommandIndex = insertAt
+        }
+        // Show the group the tag was saved to when the current filter would hide it
+        if (!this.matchesGroupFilter(item, this.getGroupFilter(savedCommands))) {
+            this.config.store.aiTerminal.senderGroupFilter = groupName ?? ''
         }
         await this.setSavedSenderCommands(savedCommands)
     }
@@ -2081,6 +2169,25 @@ export class AITerminalPanel {
         nameInput.value = savedCommand?.name ?? ''
         nameLabel.appendChild(nameInput)
 
+        const groupLabel = document.createElement('label')
+        groupLabel.className = 'ai-sender-tag-editor-label'
+        groupLabel.textContent = 'Group (optional)'
+
+        const groupInput = document.createElement('input')
+        groupInput.type = 'text'
+        groupInput.className = 'form-control'
+        groupInput.placeholder = 'Leave blank to keep the tag ungrouped'
+        groupInput.value = savedCommand ? savedCommand.group ?? '' : this.getActiveGroup() ?? ''
+        const groupOptions = document.createElement('datalist')
+        groupOptions.id = `ai-sender-tag-groups-${++tagGroupListSeq}`
+        for (const group of this.getSavedGroups(this.getSavedSenderCommands())) {
+            const option = document.createElement('option')
+            option.value = group
+            groupOptions.appendChild(option)
+        }
+        groupInput.setAttribute('list', groupOptions.id)
+        groupLabel.append(groupInput, groupOptions)
+
         const commandLabel = document.createElement('label')
         commandLabel.className = 'ai-sender-tag-editor-label'
         commandLabel.textContent = 'Command'
@@ -2115,11 +2222,11 @@ export class AITerminalPanel {
                 return
             }
             saveButton.disabled = true
-            void this.saveSenderCommand(nameInput.value, command, editIndex).then(() => this.closeSenderTagEditor())
+            void this.saveSenderCommand(nameInput.value, command, groupInput.value, editIndex).then(() => this.closeSenderTagEditor())
         })
         actions.append(cancelButton, saveButton)
 
-        editor.append(title, nameLabel, commandLabel, error, actions)
+        editor.append(title, nameLabel, groupLabel, commandLabel, error, actions)
         overlay.appendChild(editor)
         overlay.addEventListener('mousedown', event => {
             if (event.target === overlay) {
@@ -2169,24 +2276,92 @@ export class AITerminalPanel {
 
         return savedCommands
             .filter((item: any) => item && typeof item.command === 'string' && item.command.trim())
-            .map((item: any) => ({
-                name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : undefined,
-                command: item.command.trim(),
-            }))
+            .map((item: any) => {
+                const command: SavedSenderCommand = {
+                    name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : undefined,
+                    command: item.command.trim(),
+                }
+                const group = typeof item.group === 'string' ? this.normalizeGroupName(item.group) : undefined
+                if (group) {
+                    command.group = group
+                }
+                return command
+            })
             .slice(-MAX_SAVED_SENDER_COMMANDS)
+    }
+
+    private normalizeGroupName (value: string): string|undefined {
+        const name = Array.from(value.trim()).slice(0, 40).join('').trim()
+        return name && name !== UNGROUPED_FILTER ? name : undefined
+    }
+
+    /** Groups in the order their first tag appears */
+    private getSavedGroups (commands: SavedSenderCommand[]): string[] {
+        return [...new Set(commands.map(item => item.group).filter((group): group is string => Boolean(group)))]
+    }
+
+    /** Current group filter: '' for all tags, a group name, or UNGROUPED_FILTER */
+    private getGroupFilter (commands: SavedSenderCommand[]): string {
+        const filter = this.config.store.aiTerminal.senderGroupFilter
+        if (filter === UNGROUPED_FILTER) {
+            return commands.some(item => item.group) && commands.some(item => !item.group) ? filter : ''
+        }
+        return typeof filter === 'string' && commands.some(item => item.group === filter) ? filter : ''
+    }
+
+    private getActiveGroup (): string|undefined {
+        const filter = this.getGroupFilter(this.getSavedSenderCommands())
+        return filter && filter !== UNGROUPED_FILTER ? filter : undefined
+    }
+
+    private matchesGroupFilter (item: SavedSenderCommand, filter: string): boolean {
+        if (!filter) {
+            return true
+        }
+        return filter === UNGROUPED_FILTER ? !item.group : item.group === filter
+    }
+
+    private setGroupFilter (filter: string): void {
+        this.config.store.aiTerminal.senderGroupFilter = filter
+        this.savedCommandTabs.scrollLeft = 0
+        this.renderSavedCommandTabs()
+        void this.config.save()
+    }
+
+    /** Index right after the last tag of the group; ungrouped tags go to the end */
+    private getGroupEndIndex (commands: SavedSenderCommand[], group: string|undefined): number {
+        if (!group) {
+            return commands.length
+        }
+        for (let index = commands.length - 1; index >= 0; index--) {
+            if (commands[index].group === group) {
+                return index + 1
+            }
+        }
+        return commands.length
     }
 
     private renderSavedCommandTabs (): void {
         const savedCommands = this.getSavedSenderCommands()
+        const filter = this.getGroupFilter(savedCommands)
+        this.renderSavedGroupBar(savedCommands, filter)
         const previousScrollLeft = this.savedCommandTabs.scrollLeft
         this.savedCommandTabs.replaceChildren()
         savedCommands.forEach((item, index) => {
+            if (!this.matchesGroupFilter(item, filter)) {
+                return
+            }
             const tab = document.createElement('button')
             tab.type = 'button'
             tab.className = 'ai-saved-command-tab'
             tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
             tab.textContent = this.buildSavedCommandLabel(item.name || item.command)
-            tab.title = item.name ? `${item.name}\n\n${item.command}\n\nRight-click to edit` : `${item.command}\n\nRight-click to edit`
+            tab.title = [
+                item.name,
+                item.command,
+                item.group ? `Group: ${item.group}` : '',
+                'Right-click to edit, drag to move',
+            ].filter(Boolean).join('\n\n')
             tab.addEventListener('click', () => this.insertSavedCommandIntoDraft(item.command, index))
             tab.addEventListener('contextmenu', event => {
                 event.preventDefault()
@@ -2194,6 +2369,7 @@ export class AITerminalPanel {
                 this.renderSavedCommandTabs()
                 this.openSenderTagEditor(index)
             })
+            this.installTagDrag(tab, index)
             this.savedCommandTabs.appendChild(tab)
         })
         if (!savedCommands.length) {
@@ -2203,6 +2379,298 @@ export class AITerminalPanel {
             this.savedCommandTabs.appendChild(hint)
         }
         this.savedCommandTabs.scrollLeft = previousScrollLeft
+    }
+
+    private renderSavedGroupBar (commands: SavedSenderCommand[], filter: string): void {
+        const groups = this.getSavedGroups(commands)
+        this.savedGroupBar.replaceChildren()
+        this.savedGroupBar.hidden = !groups.length
+        this.savedGroupBar.parentElement?.classList.toggle('has-groups', groups.length > 0)
+        if (!groups.length) {
+            return
+        }
+
+        const chip = (label: string, value: string, count: number): HTMLButtonElement => {
+            const element = document.createElement('button')
+            element.type = 'button'
+            element.className = 'ai-saved-group-chip'
+            element.classList.toggle('is-active', value === filter)
+            const text = document.createElement('span')
+            text.className = 'ai-saved-group-name'
+            text.textContent = label
+            const badge = document.createElement('span')
+            badge.className = 'ai-saved-group-count'
+            badge.textContent = String(count)
+            element.append(text, badge)
+            element.addEventListener('click', () => this.setGroupFilter(value))
+            this.savedGroupBar.appendChild(element)
+            return element
+        }
+
+        chip('All', '', commands.length).title = 'Show all tags'
+        for (const group of groups) {
+            const element = chip(group, group, commands.filter(item => item.group === group).length)
+            element.title = `${group}\n\nRight-click for group actions, drag to reorder`
+            element.addEventListener('contextmenu', event => {
+                event.preventDefault()
+                this.openGroupMenu(group, event)
+            })
+            this.installGroupDrag(element, group)
+        }
+        const ungroupedCount = commands.filter(item => !item.group).length
+        const ungrouped = chip('Ungrouped', UNGROUPED_FILTER, ungroupedCount)
+        ungrouped.classList.add('is-ungrouped')
+        // Shown only while a tag is dragged when there are no ungrouped tags
+        ungrouped.classList.toggle('is-empty', ungroupedCount === 0)
+        ungrouped.title = 'Tags without a group\n\nDrop a tag here to take it out of its group'
+        ungrouped.addEventListener('contextmenu', event => {
+            event.preventDefault()
+            this.openGroupMenu(null, event)
+        })
+        this.installGroupChipDrop(ungrouped, null)
+    }
+
+    private openGroupMenu (group: string|null, event: MouseEvent): void {
+        const count = this.getSavedSenderCommands().filter(item => group === null ? !item.group : item.group === group).length
+        const menu: MenuItemOptions[] = [
+            { label: `Insert all into Sender (${count})`, enabled: count > 0, click: () => this.insertGroupIntoDraft(group) },
+        ]
+        if (group !== null) {
+            menu.push(
+                { type: 'separator' },
+                { label: 'Rename group...', click: () => this.openRenameGroupDialog(group) },
+                { label: 'Delete group', click: () => void this.deleteGroup(group) },
+            )
+        }
+        this.platform.popupContextMenu(menu, event)
+    }
+
+    /** Puts every command of the group into the Sender, one per line, ready for Send all */
+    private insertGroupIntoDraft (group: string|null): void {
+        const commands = this.getSavedSenderCommands()
+            .filter(item => group === null ? !item.group : item.group === group)
+            .map(item => item.command)
+        if (!commands.length) {
+            return
+        }
+        this.resolveVariables(commands, filled => {
+            this.selectedSavedCommandIndex = -1
+            this.insertIntoDraft(filled.join('\n'))
+        })
+    }
+
+    private openRenameGroupDialog (group: string): void {
+        this.openFormDialog('Rename group', [{ label: 'Group name', value: group }], 'Rename', ([value]) => {
+            const name = this.normalizeGroupName(value)
+            if (!name) {
+                return false
+            }
+            void this.renameGroup(group, name)
+            return true
+        })
+    }
+
+    /** Renaming to an existing group name merges the two groups */
+    private async renameGroup (from: string, to: string): Promise<void> {
+        const commands = this.getSavedSenderCommands()
+        for (const item of commands) {
+            if (item.group === from) {
+                item.group = to
+            }
+        }
+        if (this.config.store.aiTerminal.senderGroupFilter === from) {
+            this.config.store.aiTerminal.senderGroupFilter = to
+        }
+        await this.setSavedSenderCommands(commands)
+    }
+
+    /** Removes the group only; its tags become ungrouped */
+    private async deleteGroup (group: string): Promise<void> {
+        const commands = this.getSavedSenderCommands()
+        const count = commands.filter(item => item.group === group).length
+        const result = await this.platform.showMessageBox({
+            type: 'warning',
+            message: `Delete group "${group}"?`,
+            detail: `Its ${count === 1 ? 'tag moves' : `${count} tags move`} to Ungrouped. The commands are kept.`,
+            buttons: ['Delete group', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+        })
+        if (result.response !== 0) {
+            return
+        }
+        for (const item of commands) {
+            if (item.group === group) {
+                delete item.group
+            }
+        }
+        await this.setSavedSenderCommands(commands)
+    }
+
+    private installTagDrag (tab: HTMLElement, index: number): void {
+        tab.draggable = true
+        tab.addEventListener('dragstart', event => {
+            event.stopPropagation()
+            this.dragTagIndex = index
+            this.dragGroup = null
+            event.dataTransfer?.setData('application/x-tabby-ai-tag', String(index))
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move'
+            }
+            tab.classList.add('is-dragging')
+            this.savedGroupBar.classList.add('is-dragging-tag')
+        })
+        tab.addEventListener('dragend', () => this.endSavedDrag())
+        tab.addEventListener('dragover', event => {
+            if (this.dragTagIndex === null || this.dragTagIndex === index) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move'
+            }
+            const before = this.isBeforeMidpoint(tab, event)
+            tab.classList.toggle('is-drop-before', before)
+            tab.classList.toggle('is-drop-after', !before)
+        })
+        tab.addEventListener('dragleave', () => tab.classList.remove('is-drop-before', 'is-drop-after'))
+        tab.addEventListener('drop', event => {
+            if (this.dragTagIndex === null) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            const from = this.dragTagIndex
+            const before = this.isBeforeMidpoint(tab, event)
+            this.endSavedDrag()
+            if (from !== index) {
+                void this.moveTag(from, index, before)
+            }
+        })
+    }
+
+    private installGroupDrag (element: HTMLElement, group: string): void {
+        element.draggable = true
+        element.addEventListener('dragstart', event => {
+            event.stopPropagation()
+            this.dragGroup = group
+            this.dragTagIndex = null
+            event.dataTransfer?.setData('application/x-tabby-ai-group', group)
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move'
+            }
+            element.classList.add('is-dragging')
+        })
+        element.addEventListener('dragend', () => this.endSavedDrag())
+        this.installGroupChipDrop(element, group)
+    }
+
+    /** A group chip accepts a dragged tag (moves it into the group) or a dragged group (reorders groups) */
+    private installGroupChipDrop (element: HTMLElement, group: string|null): void {
+        const acceptsGroup = () => group !== null && this.dragGroup !== null && this.dragGroup !== group
+        element.addEventListener('dragover', event => {
+            if (this.dragTagIndex === null && !acceptsGroup()) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move'
+            }
+            if (this.dragTagIndex !== null) {
+                element.classList.add('is-drop-target')
+            } else {
+                const before = this.isBeforeMidpoint(element, event)
+                element.classList.toggle('is-drop-before', before)
+                element.classList.toggle('is-drop-after', !before)
+            }
+        })
+        element.addEventListener('dragleave', () => element.classList.remove('is-drop-target', 'is-drop-before', 'is-drop-after'))
+        element.addEventListener('drop', event => {
+            if (this.dragTagIndex === null && !acceptsGroup()) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            const tagIndex = this.dragTagIndex
+            const draggedGroup = this.dragGroup
+            const before = this.isBeforeMidpoint(element, event)
+            this.endSavedDrag()
+            if (tagIndex !== null) {
+                void this.moveTagToGroup(tagIndex, group ?? undefined)
+            } else if (draggedGroup !== null && group !== null) {
+                void this.moveGroup(draggedGroup, group, before)
+            }
+        })
+    }
+
+    private endSavedDrag (): void {
+        this.dragTagIndex = null
+        this.dragGroup = null
+        this.savedGroupBar.classList.remove('is-dragging-tag')
+        for (const container of [this.savedGroupBar, this.savedCommandTabs]) {
+            for (const element of Array.from(container.querySelectorAll('.is-dragging, .is-drop-before, .is-drop-after, .is-drop-target'))) {
+                element.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after', 'is-drop-target')
+            }
+        }
+    }
+
+    private isBeforeMidpoint (element: HTMLElement, event: MouseEvent): boolean {
+        const rect = element.getBoundingClientRect()
+        return event.clientX < rect.left + rect.width / 2
+    }
+
+    /** Moves a tag next to another tag; it joins the group of that tag */
+    private async moveTag (from: number, to: number, before: boolean): Promise<void> {
+        const commands = this.getSavedSenderCommands()
+        const item = commands[from]
+        const target = commands[to] as SavedSenderCommand|undefined
+        if (!target) {
+            return
+        }
+        commands.splice(from, 1)
+        if (target.group) {
+            item.group = target.group
+        } else {
+            delete item.group
+        }
+        const insertAt = commands.indexOf(target) + (before ? 0 : 1)
+        commands.splice(insertAt, 0, item)
+        this.selectedSavedCommandIndex = insertAt
+        await this.setSavedSenderCommands(commands)
+    }
+
+    private async moveTagToGroup (index: number, group: string|undefined): Promise<void> {
+        const commands = this.getSavedSenderCommands()
+        const [item] = commands.splice(index, 1) as (SavedSenderCommand|undefined)[]
+        if (!item || item.group === group) {
+            return
+        }
+        if (group) {
+            item.group = group
+        } else {
+            delete item.group
+        }
+        const insertAt = this.getGroupEndIndex(commands, group)
+        commands.splice(insertAt, 0, item)
+        this.selectedSavedCommandIndex = insertAt
+        await this.setSavedSenderCommands(commands)
+    }
+
+    /** Moves all tags of a group before or after the tags of another group */
+    private async moveGroup (group: string, target: string, before: boolean): Promise<void> {
+        const commands = this.getSavedSenderCommands()
+        const selected = commands[this.selectedSavedCommandIndex] as SavedSenderCommand|undefined
+        const moving = commands.filter(item => item.group === group)
+        const rest = commands.filter(item => item.group !== group)
+        const first = rest.findIndex(item => item.group === target)
+        if (first < 0) {
+            return
+        }
+        rest.splice(before ? first : this.getGroupEndIndex(rest, target), 0, ...moving)
+        this.selectedSavedCommandIndex = selected ? rest.indexOf(selected) : -1
+        await this.setSavedSenderCommands(rest)
     }
 
     private buildSavedCommandLabel (value: string): string {

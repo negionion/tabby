@@ -88,6 +88,7 @@ The Claude Code CLI has no model-list command, so the model list is built by pro
 - **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
 - **Sender**: commands to send to the current terminal. Send next sends the first line. Send all sends one line at a time, waits for the terminal prompt (`senderPromptPattern`) before the next line, and stops when the prompt does not return within `senderLineTimeoutMs` or when Stop is pressed. Commands matching `dangerousCommandPatterns` ask for confirmation. An empty sender collapses to one line (`senderAutoCollapse`).
 - **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. Right-click a tag to edit or delete it. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.
+- **Tag groups**: a tag can belong to a group, set in the tag dialog. When any tag has a group, group chips (All, each group, Ungrouped) appear before the tags and filter them. Right-click a group to insert all of its commands into the sender, rename it, or delete it (its tags become ungrouped). Drag a tag onto another tag to reorder it, which also moves it into that tag's group; drag it onto a group chip to move it into that group, or drag a group chip to reorder groups.
 - **Resize**: drag the panel's left edge or the sender's top edge. Double-click a handle to restore the default size.
 
 ## Settings
@@ -109,6 +110,7 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `senderLineTimeoutMs` | `20000` | How long Send all waits for the prompt before it stops. |
 | `dangerousCommandPatterns` | `null` | Regular expressions for commands that need confirmation. `null` uses the built-in list. |
 | `senderVariables` | `{}` | Last values entered for `{{name}}` tag placeholders. |
+| `senderGroupFilter` | `''` | Group shown in the sender. Empty shows all tags. |
 
 ## Project Structure
 
