@@ -60,6 +60,10 @@ const CLAUDE_MODE_TOOLS: Record<ClaudeMode, string> = {
 }
 
 const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+const SESSION_ID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+/** stderr kept for the error message of a failed run, and how many of its last lines are shown */
+const STDERR_KEEP_CHARS = 64 * 1024
+const STDERR_SHOWN_LINES = 40
 
 interface ReferenceFolderPaths {
     nativePath: string
@@ -85,6 +89,13 @@ export class AIProviderRunnerService {
         const child = provider.id === 'claude'
             ? this.spawnClaude(request, claudeSessionID!, referenceFolder)
             : this.spawnCodex(request, referenceFolder)
+        this.providerAuth.beginProviderRun()
+        child.once('close', () => this.providerAuth.endProviderRun())
+        // Decode as a stream, so a multi-byte character split across chunks is not garbled
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
+        // A CLI that exits early (unknown flag, cancel) makes pending writes fail with EPIPE
+        child.stdin.on('error', () => undefined)
         let stderr = ''
         let detectedSessionID = request.sessionID
         let outputForSessionID = ''
@@ -99,7 +110,7 @@ export class AIProviderRunnerService {
                     detectedSessionID = claudeSessionID
                     handlers.session(claudeSessionID)
                 }
-                claudeOutputBuffer += data.toString()
+                claudeOutputBuffer += data
                 const lines = claudeOutputBuffer.split(/\r?\n/)
                 claudeOutputBuffer = lines.pop() ?? ''
                 for (const line of lines) {
@@ -110,10 +121,10 @@ export class AIProviderRunnerService {
                 }
                 return
             }
-            const chunk = stdoutSanitizer.write(data.toString())
+            const chunk = stdoutSanitizer.write(data)
             if (!detectedSessionID) {
                 outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
-                detectedSessionID = this.extractSessionID(outputForSessionID)
+                detectedSessionID = this.findSessionID(outputForSessionID)
                 if (detectedSessionID) {
                     handlers.session(detectedSessionID)
                 }
@@ -121,11 +132,11 @@ export class AIProviderRunnerService {
             handlers.output(chunk)
         })
         child.stderr.on('data', data => {
-            const chunk = stderrSanitizer.write(data.toString())
-            stderr = `${stderr}${chunk}`
+            const chunk = stderrSanitizer.write(data)
+            stderr = `${stderr}${chunk}`.slice(-STDERR_KEEP_CHARS)
             if (!detectedSessionID) {
                 outputForSessionID = `${outputForSessionID}${chunk}`.slice(-4096)
-                detectedSessionID = this.extractSessionID(outputForSessionID)
+                detectedSessionID = this.findSessionID(outputForSessionID)
                 if (detectedSessionID) {
                     handlers.session(detectedSessionID)
                 }
@@ -141,7 +152,9 @@ export class AIProviderRunnerService {
                 handlers.session(sessionID)
             }
             if (code && code !== 0 && stderr.trim()) {
-                handlers.error(stderr)
+                // Codex echoes the whole prompt (with the terminal output) on stderr; the end holds the error
+                const lines = stderr.trim().split(/\r?\n/)
+                handlers.error(`${lines.length > STDERR_SHOWN_LINES ? `...\n${lines.slice(-STDERR_SHOWN_LINES).join('\n')}` : lines.join('\n')}\n`)
             }
             handlers.done(code)
         })
@@ -154,11 +167,8 @@ export class AIProviderRunnerService {
         }
 
         return {
-            cancel: () => {
-                if (!child.killed) {
-                    child.kill()
-                }
-            },
+            // On Windows this also ends the CLI under cmd.exe, so a cancelled run stops editing files
+            cancel: () => this.providerAuth.killProcessTree(child),
         }
     }
 
@@ -194,8 +204,7 @@ export class AIProviderRunnerService {
             args.push('--model', model)
         }
 
-        const invocation = this.providerAuth.buildProviderCommandInvocation('claude', args)
-        return spawn(invocation.command, invocation.args, { env: invocation.env, cwd: referenceFolder?.nativePath })
+        return this.spawnProvider('claude', args, referenceFolder)
     }
 
     /** Mode, tools and effort for the next Claude Code run. Without a reference folder every mode runs as Plan. */
@@ -226,9 +235,10 @@ export class AIProviderRunnerService {
             return false
         }
         const reply = (response: Record<string, any>) => {
-            try {
+            // The run may have been cancelled while the permission card was open
+            if (child.stdin.writable) {
                 child.stdin.write(`${JSON.stringify({ type: 'control_response', response })}\n`)
-            } catch { }
+            }
         }
         if (event.type === 'result') {
             // The conversation turn is over; closing stdin lets the CLI exit
@@ -283,7 +293,8 @@ export class AIProviderRunnerService {
                 .map((block: any) => block.text)
                 .join('')
             if (text) {
-                handlers.output(text)
+                // Each assistant event is a whole message; keep messages around tool calls apart
+                handlers.output(producedText ? `\n\n${text}` : text)
                 return true
             }
         }
@@ -326,8 +337,17 @@ export class AIProviderRunnerService {
         }
         args.push('-')
 
-        const invocation = this.providerAuth.buildProviderCommandInvocation('codex', args)
-        return spawn(invocation.command, invocation.args, { env: invocation.env, cwd: referenceFolder?.nativePath })
+        return this.spawnProvider('codex', args, referenceFolder)
+    }
+
+    private spawnProvider (command: string, args: string[], referenceFolder: ReferenceFolderPaths|null): ChildProcessWithoutNullStreams {
+        const invocation = this.providerAuth.buildProviderCommandInvocation(command, args, referenceFolder?.nativePath)
+        return spawn(invocation.command, invocation.args, {
+            env: invocation.env,
+            cwd: invocation.cwd,
+            windowsHide: true,
+            windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        })
     }
 
     private resolveReferenceFolder (folder: string|null): ReferenceFolderPaths|null {
@@ -355,7 +375,7 @@ export class AIProviderRunnerService {
         const sessionsDir = path.join(this.getCodexHome(), 'sessions')
         const candidates = this.findRecentSessionFiles(sessionsDir, startedAt - 5000)
         for (const filePath of candidates) {
-            const id = this.extractSessionID(filePath)
+            const id = this.readSessionIDFromFile(filePath)
             if (id) {
                 return id
             }
@@ -397,16 +417,18 @@ export class AIProviderRunnerService {
         return files.sort((a, b) => b.mtime - a.mtime).map(item => item.path)
     }
 
-    private extractSessionID (filePath: string): string|null {
-        const sessionIDPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
-        const fromPath = sessionIDPattern.exec(filePath)?.[0]
+    private findSessionID (text: string): string|null {
+        return SESSION_ID_PATTERN.exec(text)?.[0] ?? null
+    }
+
+    private readSessionIDFromFile (filePath: string): string|null {
+        const fromPath = this.findSessionID(filePath)
         if (fromPath) {
             return fromPath
         }
 
         try {
-            const content = fs.readFileSync(filePath, 'utf8')
-            return sessionIDPattern.exec(content)?.[0] ?? null
+            return this.findSessionID(fs.readFileSync(filePath, 'utf8'))
         } catch {
             return null
         }

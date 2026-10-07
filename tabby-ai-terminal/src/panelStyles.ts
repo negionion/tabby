@@ -318,9 +318,65 @@ export const AI_TERMINAL_PANEL_STYLES = `
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.ai-reference-folder-row .btn {
+.ai-more-button {
     flex: 0 0 auto;
-    white-space: nowrap;
+    align-self: stretch;
+    padding-left: 10px;
+    padding-right: 10px;
+    font-weight: 700;
+}
+.ai-folder-field {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-right: 4px;
+    cursor: pointer;
+}
+.ai-folder-field:hover {
+    border-color: rgba(143, 211, 255, 0.45);
+}
+.ai-folder-field-button {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+.ai-folder-icon {
+    flex: 0 0 auto;
+    display: inline-flex;
+    color: #8fa7bd;
+}
+.ai-folder-clear-button {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #8fa7bd;
+    line-height: 1.4;
+}
+.ai-folder-clear-button:hover:not(:disabled) {
+    color: #ff8d8d;
+    background: rgba(255, 96, 96, 0.12);
+}
+.ai-folder-clear-button[hidden] {
+    display: none;
+}
+.ai-folder-field-button:disabled,
+.ai-folder-clear-button:disabled {
+    opacity: 0.55;
+    cursor: default;
 }
 .ai-terminal-content {
     flex: 1;

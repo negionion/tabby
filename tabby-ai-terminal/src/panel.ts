@@ -10,9 +10,18 @@ const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
 const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 const MAX_SAVED_SENDER_COMMANDS = 100
+/** Output without a line break is cut into a line of its last MAX_OUTPUT_LINE_CHARS characters past this size */
+const MAX_PENDING_OUTPUT_CHARS = 64 * 1024
+const MAX_OUTPUT_LINE_CHARS = 8 * 1024
+/** How long "CLI is up to date" / "CLI update failed" stays in the header after a check */
+const CLI_NOTICE_MS = 60 * 1000
 /** senderGroupFilter value that shows the tags without a group */
 const UNGROUPED_FILTER = '__ungrouped__'
 let tagGroupListSeq = 0
+/** Secret names; the lookbehind also matches after "_" (sae_password, wpa_passphrase) but not inside words */
+const SECRET_NAMES = '(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|passphrase|psk)'
+const SECRET_QUOTED_PATTERN = new RegExp(`${SECRET_NAMES}(["']?\\s*[:=]\\s*)(["'])(?:(?!\\3).)*\\3`, 'gi')
+const SECRET_PLAIN_PATTERN = new RegExp(`${SECRET_NAMES}(["']?\\s*[:=]\\s*)([^\\s'",;]+)`, 'gi')
 const DEFAULT_PROMPT_PATTERN = '[#$>]\\s*$'
 const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
@@ -56,6 +65,7 @@ export class AITerminalPanel {
     private headerControls: HTMLElement
     private referenceFolderRow: HTMLElement
     private signedInIdentity: HTMLElement
+    private cliNoticeTimer: ReturnType<typeof setTimeout>|null = null
     private providerSelect: HTMLSelectElement
     private modelSelect: HTMLSelectElement
     private modeSelect: HTMLSelectElement
@@ -69,7 +79,7 @@ export class AITerminalPanel {
     private statusLine: HTMLElement
     private loginOnly: HTMLElement
     private content: HTMLElement
-    private headerLogoutButton: HTMLButtonElement
+    private moreButton: HTMLButtonElement
     private loginOnlyLoginButton: HTMLButtonElement
     private clearLatestButton: HTMLButtonElement
     private resetSessionButton: HTMLButtonElement
@@ -116,6 +126,12 @@ export class AITerminalPanel {
     private senderStopRequested = false
     private senderForceOpen = false
     private senderPointerDown = false
+    private pendingCarriageReturn = false
+    /** True from Analyze until the answer ends, including a wait for a CLI update */
+    private analyzing = false
+    private providerSwitchedDuringRun = false
+    private destroyed = false
+    private modelOptionsProvider: AIProviderID|null = null
     private senderNotice = ''
     private senderProgress = ''
     private outputLineSeq = 0
@@ -150,6 +166,7 @@ export class AITerminalPanel {
     private dragGroup: string|null = null
     private senderTagEditor: HTMLElement|null = null
     private statusSubscription: Subscription
+    private cliUpdateSubscription: Subscription
     private configSubscription: Subscription|null = null
     private runHandle: AIProviderRunHandle|null = null
     private runGeneration = 0
@@ -168,6 +185,21 @@ export class AITerminalPanel {
         this.providerRunner = providerRunner
         this.statusSubscription = this.providerAuth.statusChanged$.subscribe(status => {
             this.applyProviderStatus(status)
+        })
+        this.cliUpdateSubscription = this.providerAuth.cliUpdated$.subscribe(() => {
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (!this.signedInIdentity) {
+                return
+            }
+            this.renderProviderIdentity()
+            // The short "up to date" / "failed" note only stays for a minute
+            if (this.cliNoticeTimer) {
+                clearTimeout(this.cliNoticeTimer)
+            }
+            this.cliNoticeTimer = setTimeout(() => {
+                this.cliNoticeTimer = null
+                this.renderProviderIdentity()
+            }, CLI_NOTICE_MS + 100)
         })
         this.element = document.createElement('aside')
         this.element.className = 'ai-terminal-panel'
@@ -206,17 +238,17 @@ export class AITerminalPanel {
         this.modelSelect.addEventListener('change', () => {
             if (this.modelSelect.value === '__recheck__') {
                 this.modelSelect.value = this.providerAuth.getSelectedModel()
-                this.providerAuth.clearClaudeModelCache()
-                void this.refreshModelOptions(true)
+                this.recheckModels()
                 return
             }
             this.providerAuth.setSelectedModel(this.modelSelect.value)
         })
+        // Lists are cached by the auth service, so opening the menu does not spawn the CLI each time
         this.modelSelect.addEventListener('pointerdown', () => {
-            void this.refreshModelOptions(true)
+            void this.refreshModelOptions()
         })
         this.modelSelect.addEventListener('focus', () => {
-            void this.refreshModelOptions(true)
+            void this.refreshModelOptions()
         })
         this.modeSelect = this.createSettingSelect('claudeMode', [
             ['plan', 'Plan (read-only)'],
@@ -242,7 +274,9 @@ export class AITerminalPanel {
         this.content = document.createElement('div')
         this.content.className = 'ai-terminal-content'
 
-        this.headerLogoutButton = this.button('Logout', 'danger', () => this.logout())
+        this.moreButton = this.button('⋯', 'secondary', event => this.openMoreMenu(event))
+        this.moreButton.classList.add('ai-more-button')
+        this.moreButton.title = 'Update CLI, re-check models, log out'
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
         this.clearLatestButton = this.button('Clear output', 'secondary', () => this.clearLatestSessionOutput())
         this.clearLatestButton.title = 'Clear the captured output (nothing is sent)'
@@ -291,7 +325,7 @@ export class AITerminalPanel {
             this.analyze()
         })
         this.element.addEventListener('keydown', event => {
-            if (event.key === 'Escape' && this.runHandle) {
+            if (event.key === 'Escape' && this.analyzing) {
                 event.preventDefault()
                 this.cancelAnalyze()
             }
@@ -422,12 +456,10 @@ export class AITerminalPanel {
 
         this.resetSessionButton.textContent = 'New session'
         this.resetSessionButton.title = 'Start a new conversation'
-        this.headerLogoutButton.className = 'btn btn-sm btn-outline-danger'
-        this.headerLogoutButton.title = 'Sign out of the provider CLI'
         this.headerControls.append(
             this.providerSelect,
             this.resetSessionButton,
-            this.headerLogoutButton,
+            this.moreButton,
         )
         this.headerCollapseButton = document.createElement('button')
         this.headerCollapseButton.type = 'button'
@@ -456,9 +488,24 @@ export class AITerminalPanel {
         const folderLabel = document.createElement('span')
         folderLabel.className = 'ai-header-label'
         folderLabel.textContent = 'Folder'
-        this.clearReferenceFolderButton.textContent = '×'
+        // The folder looks like the selects above: the whole field picks a folder, ✕ clears it
+        this.referenceFolderButton.className = 'ai-folder-field-button'
+        const folderIcon = document.createElement('span')
+        folderIcon.className = 'ai-folder-icon'
+        folderIcon.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.75 3.5h4.2l1.4 1.5h6.9v7.75H1.75z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>'
+        this.referenceFolderButton.replaceChildren(folderIcon, this.referenceFolderPathElement)
+        this.clearReferenceFolderButton.className = 'ai-folder-clear-button'
+        this.clearReferenceFolderButton.textContent = '✕'
         this.clearReferenceFolderButton.title = 'Clear folder'
-        this.referenceFolderRow.append(folderLabel, this.referenceFolderPathElement, this.referenceFolderButton, this.clearReferenceFolderButton)
+        const folderField = document.createElement('div')
+        folderField.className = 'form-control form-control-sm ai-folder-field'
+        folderField.append(this.referenceFolderButton, this.clearReferenceFolderButton)
+        folderField.addEventListener('click', event => {
+            if (event.target === folderField && !this.referenceFolderButton.disabled) {
+                void this.selectReferenceFolder()
+            }
+        })
+        this.referenceFolderRow.append(folderLabel, folderField)
         this.headerFooter.append(this.signedInIdentity)
         this.header.append(
             this.headerSummary,
@@ -531,6 +578,8 @@ export class AITerminalPanel {
     }
 
     destroy (): void {
+        this.destroyed = true
+        this.senderStopRequested = true
         this.cancelAnalyze()
         this.closeSenderTagEditor()
         this.closeAnswerViewer()
@@ -544,6 +593,10 @@ export class AITerminalPanel {
             this.layoutFrame = null
         }
         this.statusSubscription.unsubscribe()
+        this.cliUpdateSubscription.unsubscribe()
+        if (this.cliNoticeTimer) {
+            clearTimeout(this.cliNoticeTimer)
+        }
         this.configSubscription?.unsubscribe()
         window.removeEventListener('focus', this.refreshAfterFocus)
         document.removeEventListener('mousedown', this.collapseSenderOnOutsideClick, true)
@@ -554,20 +607,35 @@ export class AITerminalPanel {
     }
 
     appendOutput (data: string): void {
-        const normalized = this.outputSanitizer.write(data).replace(/\r\n?/g, '\n')
-        if (!normalized) {
+        let text = this.outputSanitizer.write(data)
+        if (this.pendingCarriageReturn) {
+            text = `\r${text}`
+            this.pendingCarriageReturn = false
+        }
+        // A trailing \r may be the first half of a \r\n split across chunks
+        if (text.endsWith('\r')) {
+            this.pendingCarriageReturn = true
+            text = text.slice(0, -1)
+        }
+        if (!text) {
             return
         }
 
-        this.pendingOutput += normalized
-        let newlineIndex = this.pendingOutput.indexOf('\n')
-        while (newlineIndex !== -1) {
-            const line = this.pendingOutput.slice(0, newlineIndex)
-            this.appendOutputLine(line)
+        const segments = text.replace(/\r+\n/g, '\n').split('\n')
+        segments[0] = this.pendingOutput + segments[0]
+        // A lone \r returns to the line start (progress bars, prompt redraws): keep what was written after it
+        this.pendingOutput = this.afterCarriageReturn(segments.pop() ?? '')
+        for (const segment of segments) {
+            this.appendOutputLine(this.afterCarriageReturn(segment))
             this.outputLineSeq++
-            this.pendingOutput = this.pendingOutput.slice(newlineIndex + 1)
-            newlineIndex = this.pendingOutput.indexOf('\n')
         }
+        if (this.pendingOutput.length > MAX_PENDING_OUTPUT_CHARS) {
+            // Output without line breaks must not grow without limit
+            this.appendOutputLine(this.pendingOutput.slice(-MAX_OUTPUT_LINE_CHARS))
+            this.outputLineSeq++
+            this.pendingOutput = ''
+        }
+        this.trimRecentOutput()
         // While "Send all" is waiting, remember when a shell prompt appears after new output lines
         if (this.senderBusy && this.pendingOutput.length < 300 && this.getPromptPattern().test(this.normalizeOutputLine(this.pendingOutput))) {
             this.promptAtLineSeq = this.outputLineSeq
@@ -626,7 +694,7 @@ export class AITerminalPanel {
     }
 
     private async analyze (): Promise<void> {
-        if (this.runHandle) {
+        if (this.analyzing) {
             return
         }
         const retry = this.retryPayload
@@ -664,6 +732,22 @@ export class AITerminalPanel {
             startedAt: Date.now(),
             model: this.providerAuth.getSelectedModel(),
             mode: this.getEffectiveModeLabel(provider),
+        }
+
+        if (this.providerAuth.isCliUpdating(provider)) {
+            // The CLI binary may be replaced during the update, so the run starts after it
+            if (this.runningTimer) {
+                clearInterval(this.runningTimer)
+                this.runningTimer = null
+            }
+            if (this.runningLabel) {
+                this.runningLabel.textContent = `Updating ${this.getProviderLabel(provider)} CLI...`
+            }
+            await this.providerAuth.waitForCliUpdate(provider)
+            if (runGeneration !== this.runGeneration) {
+                return
+            }
+            this.setRunning(true)
         }
 
         try {
@@ -823,10 +907,11 @@ export class AITerminalPanel {
         }
         const analysis = this.currentAnalysis ?? this.appendSentChatMessage('', '')
         this.currentAnalysis = analysis
-        if (analysis.textContent === ANALYSIS_PLACEHOLDER) {
+        if (analysis.childNodes.length === 1 && analysis.firstChild?.nodeValue === ANALYSIS_PLACEHOLDER) {
             analysis.textContent = ''
         }
-        analysis.textContent = `${analysis.textContent}${chunk}`
+        // Appending a text node keeps streaming linear; `textContent +=` copies the whole answer for every chunk
+        analysis.append(chunk)
         this.scheduleLiveRender(analysis)
         this.scrollChatToBottom()
     }
@@ -862,6 +947,17 @@ export class AITerminalPanel {
     }
 
     private setRunning (running: boolean): void {
+        this.analyzing = running
+        if (running && document.activeElement === this.question) {
+            // The question box is disabled below; keep focus in the panel so Esc still cancels
+            this.element.focus({ preventScroll: true })
+        }
+        if (!running && this.providerSwitchedDuringRun) {
+            // Another tab switched the provider during this answer; the next question starts a new session
+            this.providerSwitchedDuringRun = false
+            this.aiSessionID = null
+            this.renderProviderIdentity()
+        }
         if (this.runningTimer) {
             clearInterval(this.runningTimer)
             this.runningTimer = null
@@ -885,7 +981,6 @@ export class AITerminalPanel {
         this.modelSelect.disabled = running
         this.modeSelect.disabled = running
         this.effortSelect.disabled = running
-        this.headerLogoutButton.disabled = running
         this.clearLatestButton.disabled = running
         this.resetSessionButton.disabled = running
         this.referenceFolderButton.disabled = running
@@ -893,7 +988,9 @@ export class AITerminalPanel {
     }
 
     private render (): void {
-        this.applyFontSize()
+        if (this.getFontSize() !== this.appliedFontSize) {
+            this.applyFontSize()
+        }
         this.trimRecentOutput()
         const senderVisible = this.visible && this.signedIn
         this.element.classList.toggle('visible', this.visible)
@@ -1134,8 +1231,13 @@ export class AITerminalPanel {
             return
         }
         if (this.lastProviderStatus && this.lastProviderStatus.provider !== status.provider) {
-            this.cancelAnalyze()
-            this.resetAIChatSession()
+            // The provider is shared by all tabs: a running answer here is not cut off by a switch in another tab
+            if (this.analyzing) {
+                this.providerSwitchedDuringRun = true
+            } else {
+                this.cancelAnalyze()
+                this.resetAIChatSession()
+            }
         }
         this.lastProviderStatus = status
         this.providerSelect.value = status.provider
@@ -1150,7 +1252,7 @@ export class AITerminalPanel {
         this.modelRow.style.display = signedIn ? '' : 'none'
         this.modeRow.style.display = signedIn && status.provider === 'claude' ? '' : 'none'
         this.resetSessionButton.hidden = !signedIn
-        this.headerLogoutButton.hidden = !signedIn
+        this.moreButton.hidden = !signedIn
         this.referenceFolderRow.hidden = !signedIn
         this.loginOnlyLoginButton.hidden = status.state === 'checking'
         this.loginOnlyLoginButton.textContent = this.getLoginButtonLabel(status)
@@ -1197,8 +1299,39 @@ export class AITerminalPanel {
         const providerID = this.lastProviderStatus?.provider ?? this.providerAuth.getSelectedProvider()
         const provider = AI_PROVIDERS.find(item => item.id === providerID)
         const providerLabel = provider?.label ?? providerID
-        this.signedInIdentity.textContent = this.signedIn ? `Session: ${this.aiSessionID ? `${this.aiSessionID.slice(0, 8)}…` : 'new'}` : providerLabel
-        this.signedInIdentity.title = this.aiSessionID ? `${providerLabel} session ${this.aiSessionID}` : `${providerLabel} - new session`
+        const session = this.signedIn ? `Session: ${this.aiSessionID ? `${this.aiSessionID.slice(0, 8)}…` : 'new'}` : providerLabel
+        const cli = this.describeCliUpdate(providerID)
+        this.signedInIdentity.textContent = cli.text ? `${session} · ${cli.text}` : session
+        const sessionTitle = this.aiSessionID ? `${providerLabel} session ${this.aiSessionID}` : `${providerLabel} - new session`
+        this.signedInIdentity.title = cli.title ? `${sessionTitle}\n${cli.title}` : sessionTitle
+    }
+
+    /** Short CLI version / update note for the identity line */
+    private describeCliUpdate (providerID: AIProviderID): { text: string, title: string } {
+        const label = this.getProviderLabel(providerID)
+        if (this.providerAuth.isCliUpdating(providerID)) {
+            return { text: `updating ${label} CLI...`, title: `Updating the ${label} CLI` }
+        }
+        const status = this.providerAuth.getCliUpdateStatus(providerID)
+        const known = this.providerAuth.getKnownCliVersion(providerID)
+        if (!status) {
+            return { text: known ? `${label} ${known}` : '', title: known ? `${label} CLI ${known}` : '' }
+        }
+        const checked = `Checked ${new Date(status.checkedAt).toLocaleString()}`
+        const age = Date.now() - status.checkedAt
+        if (status.state === 'updated' && age < 24 * 3600 * 1000) {
+            return { text: `CLI updated to ${status.version}`, title: `${label} CLI ${status.previousVersion} → ${status.version}\n${checked}` }
+        }
+        if (status.state === 'error') {
+            return { text: age < CLI_NOTICE_MS ? 'CLI update failed' : known ? `${label} ${known}` : '', title: `${label} CLI update failed: ${status.message ?? 'unknown error'}\n${checked}` }
+        }
+        const version = status.version ? ` ${status.version}` : ''
+        const current = known ? `${label} ${known}` : ''
+        return { text: status.state === 'current' && age < CLI_NOTICE_MS ? `CLI${version} is up to date` : current, title: `${label} CLI${version}\n${checked}` }
+    }
+
+    private getProviderLabel (providerID: AIProviderID): string {
+        return AI_PROVIDERS.find(item => item.id === providerID)?.label ?? providerID
     }
 
     private shouldRefreshAfterFocus (): boolean {
@@ -1226,20 +1359,59 @@ export class AITerminalPanel {
         if (this.modeRow) {
             this.modeRow.style.display = this.signedIn && provider.id === 'claude' ? '' : 'none'
         }
-        this.modelSelect.replaceChildren()
-        this.modelSelect.appendChild(this.modelOption(selectedModel, selectedModel === 'auto' ? 'Auto model' : selectedModel))
-        this.modelSelect.value = selectedModel
+        // Keep the current list while loading, so an open menu does not shrink to one entry under the pointer
+        if (this.modelOptionsProvider !== provider.id) {
+            this.modelSelect.replaceChildren(this.modelOption(selectedModel, selectedModel === 'auto' ? 'Auto model' : selectedModel))
+            this.modelSelect.value = selectedModel
+        }
 
         const models = await this.providerAuth.getAvailableModels(provider.id, force)
-        const modelOptions = models.includes(selectedModel) ? models : [selectedModel, ...models]
-        this.modelSelect.replaceChildren()
-        for (const model of modelOptions) {
-            this.modelSelect.appendChild(this.decorateModelOption(provider.id, this.modelOption(model, model === 'auto' ? 'Auto model' : model)))
+        if (this.providerSelect.value !== provider.id) {
+            // The provider changed while this list was loading
+            return this.refreshModelOptionsNow(force)
         }
+        const currentModel = this.providerAuth.getSelectedModel()
+        const modelOptions = models.includes(currentModel) ? models : [currentModel, ...models]
+        const options = modelOptions.map(model => this.decorateModelOption(provider.id, this.modelOption(model, model === 'auto' ? 'Auto model' : model)))
         if (provider.id === 'claude') {
-            this.modelSelect.appendChild(this.modelOption('__recheck__', '↻ Re-check model availability'))
+            options.push(this.modelOption('__recheck__', '↻ Re-check model availability'))
         }
-        this.modelSelect.value = selectedModel
+        this.modelSelect.replaceChildren(...options)
+        this.modelSelect.value = currentModel
+        this.modelOptionsProvider = provider.id
+    }
+
+    private recheckModels (): void {
+        const recheck = this.modelSelect.querySelector<HTMLOptionElement>('option[value="__recheck__"]')
+        if (recheck) {
+            recheck.textContent = '↻ Checking models...'
+            recheck.disabled = true
+        }
+        this.providerAuth.clearClaudeModelCache()
+        void this.refreshModelOptions(true)
+    }
+
+    /** Less frequent actions: CLI update, model re-check and log out */
+    private openMoreMenu (event: MouseEvent): void {
+        const provider = this.providerAuth.getSelectedProvider()
+        const label = this.getProviderLabel(provider)
+        const updating = this.providerAuth.isCliUpdating(provider)
+        const version = this.providerAuth.getKnownCliVersion(provider)
+        const menu: MenuItemOptions[] = [
+            {
+                label: updating ? `Updating ${label} CLI...` : `Update ${label} CLI${version ? ` (${version})` : ''}`,
+                enabled: !updating,
+                click: () => void this.providerAuth.updateProviderCli(provider),
+            },
+        ]
+        if (provider === 'claude') {
+            menu.push({ label: 'Re-check model availability', enabled: !this.analyzing, click: () => this.recheckModels() })
+        }
+        menu.push(
+            { type: 'separator' },
+            { label: `Log out of ${label}...`, enabled: !this.analyzing, click: () => void this.logout() },
+        )
+        this.platform.popupContextMenu(menu, event)
     }
 
     /** Marks probed Claude models: resolved alias, unavailable (disabled) or check failed */
@@ -1725,7 +1897,10 @@ export class AITerminalPanel {
         if (!match) {
             return { commands: [], rest: text }
         }
-        const commands = match[2].split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'))
+        // Control characters (a lone \r, ESC) are removed: they would run extra commands or hide text in the terminal
+        const commands = match[2].split(/\r\n?|\n/)
+            .map(line => line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim())
+            .filter(line => line && !line.startsWith('#'))
         return { commands, rest: `${text.slice(0, match.index)}${match[1]}${text.slice(match.index + match[0].length)}`.trimEnd() }
     }
 
@@ -1939,7 +2114,7 @@ export class AITerminalPanel {
                 continue
             }
             // "_" only starts emphasis at a word boundary, so snake_case names stay literal
-            const em = /^\*(?=\S)([^*]+?\S|\S)\*(?!\*)/.exec(rest) ?? (/(^|[^\w])$/.test(text.slice(0, index)) ? /^_(?=\S)([^_]+?\S|\S)_(?!\w)/.exec(rest) : null)
+            const em = /^\*(?=\S)([^*]+?\S|\S)\*(?!\*)/.exec(rest) ?? (index === 0 || !/\w/.test(text[index - 1]) ? /^_(?=\S)([^_]+?\S|\S)_(?!\w)/.exec(rest) : null)
             if (em) {
                 flush()
                 const element = document.createElement('em')
@@ -2072,7 +2247,7 @@ export class AITerminalPanel {
             if (event.key === 'Escape') {
                 event.preventDefault()
                 this.closeSenderTagEditor()
-            } else if (event.key === 'Enter') {
+            } else if (event.key === 'Enter' && !event.isComposing) {
                 event.preventDefault()
                 confirm()
             }
@@ -2882,18 +3057,14 @@ export class AITerminalPanel {
         this.clearReferenceFolderButton.hidden = !hasFolder
         this.referenceFolderPathElement.hidden = false
         this.referenceFolderPathElement.classList.toggle('is-empty', !hasFolder)
-        const buttonLabel = hasFolder ? 'Change' : 'Select'
-        if (this.referenceFolderButton.textContent !== buttonLabel) {
-            this.referenceFolderButton.textContent = buttonLabel
-        }
         if (!this.referenceFolder) {
-            this.referenceFolderPathElement.textContent = 'not selected'
-            this.referenceFolderPathElement.title = 'Without a folder, every mode runs as Plan (read-only)'
+            this.referenceFolderPathElement.textContent = 'not selected - click to choose'
+            this.referenceFolderButton.title = 'Choose a folder Claude Code may read.\nWithout a folder, every mode runs as Plan (read-only).'
             return
         }
 
         this.referenceFolderPathElement.textContent = this.formatReferenceFolderPath(this.referenceFolder)
-        this.referenceFolderPathElement.title = this.referenceFolder
+        this.referenceFolderButton.title = `${this.referenceFolder}\n\nClick to choose another folder`
     }
 
     private formatReferenceFolderPath (folder: string): string {
@@ -2912,8 +3083,13 @@ export class AITerminalPanel {
     }
 
     private requestTerminalRefit (): void {
-        setTimeout(() => this.tab.configure())
-        setTimeout(() => this.tab.configure(), 80)
+        const refit = () => {
+            if (!this.destroyed) {
+                this.tab.configure()
+            }
+        }
+        setTimeout(refit)
+        setTimeout(refit, 80)
     }
 
     private scrollLatestOutputToBottom (): void {
@@ -2991,9 +3167,9 @@ export class AITerminalPanel {
     }
 
     private trimRecentOutput (): void {
-        const limit = this.getSessionOutputLimit()
-        if (this.recentOutputLines.length > limit) {
-            this.recentOutputLines = this.recentOutputLines.slice(-limit)
+        const excess = this.recentOutputLines.length - this.getSessionOutputLimit()
+        if (excess > 0) {
+            this.recentOutputLines.splice(0, excess)
         }
     }
 
@@ -3018,8 +3194,12 @@ export class AITerminalPanel {
             .replace(/\b(AKIA[0-9A-Z]{16})\b/g, '[redacted-aws-key]')
             .replace(/\b(xox[baprs]-[A-Za-z0-9-]{20,})\b/g, '[redacted-slack-token]')
             .replace(/:\/\/([^:\s/@]+):([^@\s]+)@/g, '://[redacted]@')
-            .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*([:=])\s*(["'])(?:(?!\3).)*\3/gi, '$1$2$3[redacted]$3')
-            .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*([:=])\s*([^\s'"]+)/gi, '$1$2[redacted]')
+            // name=value, name: value, "name": "value", sae_password=..., wpa_passphrase=...
+            .replace(SECRET_QUOTED_PATTERN, '$1$2$3[redacted]$3')
+            .replace(SECRET_PLAIN_PATTERN, '$1$2[redacted]')
+            // OpenWrt Wi-Fi keys: `uci show` (wireless.x.key='...') and /etc/config (option key '...')
+            .replace(/(\.key=|\boption\s+key\s+)(["'])(?:(?!\2).)*\2/gi, '$1$2[redacted]$2')
+            .replace(/(\.key=)([^\s'"]+)/gi, '$1[redacted]')
     }
 
     private countOutputLines (output: string): number {
@@ -3099,7 +3279,11 @@ export class AITerminalPanel {
 
         this.skipNextEmptyInputOutputLine = false
         this.recentOutputLines.push(normalizedLine)
-        this.trimRecentOutput()
+    }
+
+    private afterCarriageReturn (line: string): string {
+        const index = line.lastIndexOf('\r')
+        return index === -1 ? line : line.slice(index + 1)
     }
 
     private flushPendingOutput (): void {
@@ -3110,6 +3294,7 @@ export class AITerminalPanel {
 
         this.appendOutputLine(this.pendingOutput)
         this.pendingOutput = ''
+        this.trimRecentOutput()
     }
 
     private normalizeOutputLine (line: string): string {

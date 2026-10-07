@@ -57,3 +57,36 @@ h3.mb-3(translate) AI terminal
 
 .alert.alert-info
     span(translate) This limit applies to the terminal output stored for the AI panel and used when you click Analyze.
+
+h3.mt-4.mb-3(translate) Provider CLIs
+
+.form-line
+    .header
+        .title(translate) Update provider CLIs automatically
+        .description(translate) Runs claude update or codex update when the AI panel checks the provider, at most once per interval and only while no answer is running.
+    toggle(
+        [(ngModel)]='config.store.aiTerminal.cliAutoUpdate',
+        (ngModelChange)='config.save()',
+    )
+
+.form-line
+    .header
+        .title(translate) CLI update interval (hours)
+        .description(translate) Minimum time between automatic update checks for each CLI.
+    input.form-control(
+        type='number',
+        min='1',
+        step='1',
+        [(ngModel)]='config.store.aiTerminal.cliUpdateIntervalHours',
+        (ngModelChange)='fixCliUpdateInterval(); config.save()',
+    )
+
+.form-line(*ngFor='let provider of providers')
+    .header
+        .title {{provider.label}} CLI
+        .description {{describeCli(provider.id)}}
+    button.btn.btn-secondary(
+        (click)='updateCliNow(provider.id)',
+        [disabled]='isCliUpdating(provider.id) || !cliVersions[provider.id]',
+        translate,
+    ) Update now

@@ -81,6 +81,10 @@ Without a reference folder every mode runs as Plan. Non-Plan modes run Claude Co
 
 The Claude Code CLI has no model-list command, so the model list is built by probing each candidate with a one-turn `claude -p --model <name>` call. Candidates that fail are marked unavailable, and the full model IDs that aliases resolve to are added to the list. Results are cached for `claudeModelCacheHours`; the `Re-check model availability` entry probes again.
 
+### CLI updates
+
+When the panel checks the selected provider, the plugin runs `claude update` or `codex update` if the last check is older than `cliUpdateIntervalHours`. Updates start only while no Claude Code or Codex process from the plugin is running, and an Analyze request made during an update waits until it finishes. The header shows `CLI updated to <version>` for a day after an update. The settings page shows each CLI's version and last result, and has an Update now button. Turn off `Update provider CLIs automatically` to update only from the settings page.
+
 ## Panel
 
 - **Header**: provider, model, mode, effort, and reference folder rows. The chevron bar collapses the header into a one-line summary.
@@ -102,6 +106,7 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `claudeModelCandidates` | `[]` | Models to probe. Empty uses the built-in candidate list. |
 | `claudeModelCacheHours` | `24` | How long model probe results are cached. |
 | `claudeModelCache` | `null` | Cached model probe results. |
+| `cliUpdateStatus` | `{}` | Last CLI update result for each provider. |
 | `panelWidth` | `360` | Panel width in pixels. |
 | `senderHeight` | `178` | Sender height in pixels. |
 | `headerCollapsed` | `false` | Whether the panel header is collapsed. |
