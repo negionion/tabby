@@ -83,16 +83,16 @@ The Claude Code CLI has no model-list command, so the model list is built by pro
 
 ### CLI updates
 
-When the panel checks the selected provider, the plugin runs `claude update` or `codex update` if the last check is older than `cliUpdateIntervalHours`. Updates start only while no Claude Code or Codex process from the plugin is running, and an Analyze request made during an update waits until it finishes. The header shows `CLI updated to <version>` for a day after an update. The settings page shows each CLI's version and last result, and has an Update now button. Turn off `Update provider CLIs automatically` to update only from the settings page.
+When the panel checks the selected provider, the plugin runs `claude update` or `codex update` if the last check is older than `cliUpdateIntervalHours`. Updates start only while no Claude Code or Codex process from the plugin is running, and an Analyze request made during an update waits until it finishes. The header shows the CLI version, and `CLI updated to <version>` for a day after an update. To update right away, use Update CLI in the header's ⋯ menu or Update now on the settings page, which also shows each CLI's last result. Turn off `Update provider CLIs automatically` to update only by hand.
 
 ## Panel
 
-- **Header**: provider, model, mode, effort, and reference folder rows. The chevron bar collapses the header into a one-line summary.
+- **Header**: provider, New session and a ⋯ menu (Update CLI, Re-check model availability, Log out), then model, mode, effort and reference folder rows. Click the folder field to choose a folder and ✕ to clear it. The chevron bar collapses the header into a one-line summary.
 - **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons.
 - **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
 - **Sender**: commands to send to the current terminal. Send next sends the first line. Send all sends one line at a time, waits for the terminal prompt (`senderPromptPattern`) before the next line, and stops when the prompt does not return within `senderLineTimeoutMs` or when Stop is pressed. Commands matching `dangerousCommandPatterns` ask for confirmation. An empty sender collapses to one line (`senderAutoCollapse`).
 - **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. Right-click a tag to edit or delete it. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.
-- **Tag groups**: a tag can belong to a group, set in the tag dialog. When any tag has a group, group chips (All, each group, Ungrouped) appear before the tags and filter them. Right-click a group to insert all of its commands into the sender, rename it, or delete it (its tags become ungrouped). Drag a tag onto another tag to reorder it, which also moves it into that tag's group; drag it onto a group chip to move it into that group, or drag a group chip to reorder groups.
+- **Tag groups**: a tag can belong to a group, set in the tag dialog. When any tag has a group, group chips (All, each group, Ungrouped) appear before the tags and filter them. Each group has a color, shown on its chip and as a bar on its tags; colors are assigned automatically without repeats, or chosen from the palette or a custom color picker. Right-click a group to insert all of its commands into the sender, rename it, change its color (Automatic, a palette color, or Custom... for any color), or delete it (its tags become ungrouped). Drag a tag onto another tag to reorder it, which also moves it into that tag's group; drag it onto a group chip to move it into that group, or drag a group chip to reorder groups.
 - **Resize**: drag the panel's left edge or the sender's top edge. Double-click a handle to restore the default size.
 
 ## Settings
@@ -116,6 +116,7 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `dangerousCommandPatterns` | `null` | Regular expressions for commands that need confirmation. `null` uses the built-in list. |
 | `senderVariables` | `{}` | Last values entered for `{{name}}` tag placeholders. |
 | `senderGroupFilter` | `''` | Group shown in the sender. Empty shows all tags. |
+| `senderGroupColors` | `{}` | Chosen group colors: a palette name (`amber`, `blue`, `green`, `purple`, `pink`, `teal`, `red`, `gray`) or `#rrggbb`. |
 
 ## Project Structure
 

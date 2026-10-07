@@ -538,9 +538,9 @@ export const AI_TERMINAL_PANEL_STYLES = `
     height: 24px;
     padding: 0 9px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 199, 94, 0.45);
+    border: 1px solid var(--ai-group-border, rgba(255, 199, 94, 0.5));
     background: transparent;
-    color: #ffd88a;
+    color: var(--ai-group-accent, #ffc75e);
     font-size: calc(var(--ai-terminal-font-size) * 0.92);
     line-height: 1;
     display: inline-flex;
@@ -549,12 +549,17 @@ export const AI_TERMINAL_PANEL_STYLES = `
     white-space: nowrap;
 }
 .ai-saved-group-chip:hover {
-    background: rgba(255, 199, 94, 0.12);
+    background: var(--ai-group-tint, rgba(255, 199, 94, 0.14));
 }
 .ai-saved-group-chip.is-active {
-    color: #1b1406;
-    background: #ffc75e;
-    border-color: #ffc75e;
+    color: var(--ai-group-on, #10151b);
+    background: var(--ai-group-color, #ffc75e);
+    border-color: var(--ai-group-color, #ffc75e);
+}
+/* A tag shows its group color as a bar on the left, also in the All view */
+.ai-saved-command-tab.has-group,
+.ai-saved-command-tab.has-group.is-active {
+    border-left: 3px solid var(--ai-group-accent);
 }
 .ai-saved-group-chip.is-ungrouped .ai-saved-group-name {
     font-style: italic;
@@ -583,6 +588,53 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-saved-command-tab.is-drop-after,
 .ai-saved-group-chip.is-drop-after {
     box-shadow: inset -3px 0 0 #8fd3ff;
+}
+.ai-color-current {
+    margin: -4px 0 10px;
+    color: #8fa7bd;
+    font-size: 12px;
+}
+.ai-color-swatch:hover {
+    transform: scale(1.15);
+}
+.ai-color-preview {
+    align-self: flex-start;
+    height: 26px;
+    margin-bottom: 14px;
+}
+.ai-color-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+.ai-color-swatch {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.ai-color-swatch.is-selected {
+    border-color: #ffffff;
+}
+.ai-color-custom {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+.ai-color-picker {
+    width: 36px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    background: transparent;
+}
+.ai-color-hex {
+    width: 9em;
+    font-family: monospace;
 }
 .ai-saved-command-hint {
     align-self: center;

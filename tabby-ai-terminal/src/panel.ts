@@ -17,6 +17,19 @@ const MAX_OUTPUT_LINE_CHARS = 8 * 1024
 const CLI_NOTICE_MS = 60 * 1000
 /** senderGroupFilter value that shows the tags without a group */
 const UNGROUPED_FILTER = '__ungrouped__'
+/** Group colors that read well on the dark panel; a group without a chosen color gets one from its name */
+const GROUP_COLORS: Record<string, { label: string, hex: string }> = {
+    amber: { label: 'Amber', hex: '#ffc75e' },
+    blue: { label: 'Blue', hex: '#6cb6ff' },
+    green: { label: 'Green', hex: '#7ee787' },
+    purple: { label: 'Purple', hex: '#c297ff' },
+    pink: { label: 'Pink', hex: '#ff8fc8' },
+    teal: { label: 'Teal', hex: '#5fd4d4' },
+    red: { label: 'Red', hex: '#ff7b72' },
+    gray: { label: 'Gray', hex: '#a9b4c0' },
+}
+const AUTO_GROUP_COLORS = ['amber', 'blue', 'green', 'purple', 'pink', 'teal', 'red']
+const ALL_GROUPS_COLOR = '#a9bed1'
 let tagGroupListSeq = 0
 /** Secret names; the lookbehind also matches after "_" (sae_password, wpa_passphrase) but not inside words */
 const SECRET_NAMES = '(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|passphrase|psk)'
@@ -132,6 +145,8 @@ export class AITerminalPanel {
     private providerSwitchedDuringRun = false
     private destroyed = false
     private modelOptionsProvider: AIProviderID|null = null
+    /** Automatic group colors, computed once per tag render */
+    private automaticGroupColors: Map<string, string>|null = null
     private senderNotice = ''
     private senderProgress = ''
     private outputLineSeq = 0
@@ -2517,6 +2532,7 @@ export class AITerminalPanel {
     }
 
     private renderSavedCommandTabs (): void {
+        this.automaticGroupColors = null
         const savedCommands = this.getSavedSenderCommands()
         const filter = this.getGroupFilter(savedCommands)
         this.renderSavedGroupBar(savedCommands, filter)
@@ -2530,6 +2546,10 @@ export class AITerminalPanel {
             tab.type = 'button'
             tab.className = 'ai-saved-command-tab'
             tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
+            if (item.group) {
+                tab.classList.add('has-group')
+                this.applyGroupColor(tab, this.getGroupColor(item.group))
+            }
             tab.textContent = this.buildSavedCommandLabel(item.name || item.command)
             tab.title = [
                 item.name,
@@ -2577,6 +2597,8 @@ export class AITerminalPanel {
             badge.className = 'ai-saved-group-count'
             badge.textContent = String(count)
             element.append(text, badge)
+            const color = value === '' ? ALL_GROUPS_COLOR : value === UNGROUPED_FILTER ? GROUP_COLORS.gray.hex : this.getGroupColor(value)
+            this.applyGroupColor(element, color)
             element.addEventListener('click', () => this.setGroupFilter(value))
             this.savedGroupBar.appendChild(element)
             return element
@@ -2614,10 +2636,230 @@ export class AITerminalPanel {
             menu.push(
                 { type: 'separator' },
                 { label: 'Rename group...', click: () => this.openRenameGroupDialog(group) },
+                { label: 'Color', submenu: this.buildGroupColorMenu(group) },
                 { label: 'Delete group', click: () => void this.deleteGroup(group) },
             )
         }
         this.platform.popupContextMenu(menu, event)
+    }
+
+    /**
+     * One run of radio items with no separator in between: Electron treats every separator-delimited run as
+     * its own radio group and checks the first item of a group with nothing checked
+     */
+    private buildGroupColorMenu (group: string): MenuItemOptions[] {
+        const chosen = this.getChosenGroupColor(group)
+        const custom = chosen?.startsWith('#') ? chosen : null
+        return [
+            { label: 'Automatic', type: 'radio', checked: !chosen, click: () => void this.setGroupColor(group, null) },
+            ...Object.entries(GROUP_COLORS).map(([key, color]): MenuItemOptions => ({
+                label: color.label,
+                type: 'radio',
+                checked: chosen === key,
+                click: () => void this.setGroupColor(group, key),
+            })),
+            { label: custom ? `Custom (${custom})...` : 'Custom...', type: 'radio', checked: !!custom, click: () => this.openGroupColorDialog(group) },
+        ]
+    }
+
+    /** A palette name or a custom #rrggbb color */
+    private getChosenGroupColor (group: string): string|null {
+        const chosen = this.config.store.aiTerminal.senderGroupColors?.[group]
+        if (typeof chosen !== 'string') {
+            return null
+        }
+        return chosen in GROUP_COLORS || /^#[0-9a-f]{6}$/i.test(chosen) ? chosen : null
+    }
+
+    /** The chosen color, or an automatic one */
+    private getGroupColor (group: string): string {
+        const chosen = this.getChosenGroupColor(group)
+        if (chosen) {
+            return chosen.startsWith('#') ? chosen.toLowerCase() : GROUP_COLORS[chosen].hex
+        }
+        return this.getAutomaticGroupColors().get(group) ?? GROUP_COLORS[AUTO_GROUP_COLORS[this.hashGroupName(group) % AUTO_GROUP_COLORS.length]].hex
+    }
+
+    /**
+     * Automatic colors avoid the colors already in use: groups are taken in name order (not display order,
+     * so dragging does not recolor them), each gets its name-based color or the next free one.
+     */
+    private getAutomaticGroupColors (): Map<string, string> {
+        if (this.automaticGroupColors) {
+            return this.automaticGroupColors
+        }
+        const groups = this.getSavedGroups(this.getSavedSenderCommands())
+        const used = new Set(groups.map(group => this.getChosenGroupColor(group)).filter((color): color is string => !!color))
+        const colors = new Map<string, string>()
+        for (const group of [...groups].sort()) {
+            if (this.getChosenGroupColor(group)) {
+                continue
+            }
+            const start = this.hashGroupName(group) % AUTO_GROUP_COLORS.length
+            const free = AUTO_GROUP_COLORS.map((_, offset) => AUTO_GROUP_COLORS[(start + offset) % AUTO_GROUP_COLORS.length]).find(key => !used.has(key))
+            const key = free ?? AUTO_GROUP_COLORS[start]
+            used.add(key)
+            colors.set(group, GROUP_COLORS[key].hex)
+        }
+        this.automaticGroupColors = colors
+        return colors
+    }
+
+    private hashGroupName (group: string): number {
+        let hash = 0
+        for (const char of group) {
+            hash = hash * 31 + (char.codePointAt(0) ?? 0) >>> 0
+        }
+        return hash
+    }
+
+    /** Sets the color, its translucent border / hover tints and a readable text color for the filled chip */
+    private applyGroupColor (element: HTMLElement, hex: string): void {
+        const [red, green, blue] = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16))
+        const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+        // A dark custom color is lightened for text and bars, which sit on the dark panel background
+        const accent = luminance < 0.4
+            ? `rgb(${[red, green, blue].map(value => Math.round(value + (255 - value) * 0.55)).join(', ')})`
+            : hex
+        element.style.setProperty('--ai-group-color', hex)
+        element.style.setProperty('--ai-group-accent', accent)
+        element.style.setProperty('--ai-group-border', luminance < 0.4 ? accent : `rgba(${red}, ${green}, ${blue}, 0.5)`)
+        element.style.setProperty('--ai-group-tint', `rgba(${red}, ${green}, ${blue}, ${luminance < 0.4 ? 0.45 : 0.14})`)
+        element.style.setProperty('--ai-group-on', luminance > 0.5 ? '#10151b' : '#ffffff')
+    }
+
+    /** Palette swatches plus the system color picker and a hex field */
+    private openGroupColorDialog (group: string): void {
+        this.closeSenderTagEditor()
+        let selected = this.getGroupColor(group)
+        const overlay = document.createElement('div')
+        overlay.className = 'ai-sender-tag-editor-overlay'
+        this.guardTerminalEvents(overlay)
+        const editor = document.createElement('div')
+        editor.className = 'ai-sender-tag-editor'
+        editor.setAttribute('role', 'dialog')
+        const title = document.createElement('div')
+        title.className = 'ai-sender-tag-editor-title'
+        title.textContent = `Color of "${group}"`
+
+        const chosen = this.getChosenGroupColor(group)
+        const current = document.createElement('div')
+        current.className = 'ai-color-current'
+        current.textContent = `Current: ${!chosen ? 'Automatic' : chosen.startsWith('#') ? `Custom ${chosen}` : GROUP_COLORS[chosen].label}`
+
+        const preview = document.createElement('span')
+        preview.className = 'ai-saved-group-chip is-active ai-color-preview'
+        preview.textContent = group
+
+        const swatches = document.createElement('div')
+        swatches.className = 'ai-color-swatches'
+        const picker = document.createElement('input')
+        picker.type = 'color'
+        picker.className = 'ai-color-picker'
+        picker.title = 'Pick any color'
+        const hexInput = document.createElement('input')
+        hexInput.type = 'text'
+        hexInput.className = 'form-control ai-color-hex'
+        hexInput.placeholder = '#rrggbb'
+        hexInput.maxLength = 7
+        const error = document.createElement('div')
+        error.className = 'ai-sender-tag-editor-error'
+
+        const select = (hex: string) => {
+            selected = hex.toLowerCase()
+            picker.value = selected
+            hexInput.value = selected
+            error.textContent = ''
+            this.applyGroupColor(preview, selected)
+            for (const swatch of Array.from(swatches.children)) {
+                swatch.classList.toggle('is-selected', (swatch as HTMLElement).dataset.hex === selected)
+            }
+        }
+        const restorePreview = () => this.applyGroupColor(preview, selected)
+        // Swatches, the picker and the hex field only select; Confirm applies. Hovering a swatch previews it.
+        for (const color of Object.values(GROUP_COLORS)) {
+            const swatch = document.createElement('button')
+            swatch.type = 'button'
+            swatch.className = 'ai-color-swatch'
+            swatch.dataset.hex = color.hex
+            swatch.title = color.label
+            swatch.style.background = color.hex
+            swatch.addEventListener('mouseenter', () => this.applyGroupColor(preview, color.hex))
+            swatch.addEventListener('mouseleave', restorePreview)
+            swatch.addEventListener('click', () => select(color.hex))
+            swatches.appendChild(swatch)
+        }
+        picker.addEventListener('input', () => select(picker.value))
+        hexInput.addEventListener('input', () => {
+            const value = hexInput.value.trim()
+            const hex = value.startsWith('#') ? value : `#${value}`
+            if (/^#[0-9a-f]{6}$/i.test(hex)) {
+                select(hex)
+                hexInput.value = value
+            }
+        })
+        const customRow = document.createElement('label')
+        customRow.className = 'ai-sender-tag-editor-label ai-color-custom'
+        customRow.append('Custom', picker, hexInput)
+
+        const apply = () => {
+            const value = hexInput.value.trim()
+            const hex = (value.startsWith('#') ? value : `#${value}`).toLowerCase()
+            if (!/^#[0-9a-f]{6}$/.test(hex)) {
+                error.textContent = 'Enter a color as #rrggbb.'
+                hexInput.focus()
+                return
+            }
+            // A palette color is stored by name, anything else as #rrggbb
+            const paletteKey = Object.keys(GROUP_COLORS).find(key => GROUP_COLORS[key].hex === hex)
+            this.closeSenderTagEditor()
+            void this.setGroupColor(group, paletteKey ?? hex)
+        }
+        const actions = document.createElement('div')
+        actions.className = 'ai-sender-tag-editor-actions'
+        const automatic = this.button('Automatic', 'secondary', () => {
+            this.closeSenderTagEditor()
+            void this.setGroupColor(group, null)
+        })
+        automatic.classList.add('ai-tag-delete-button')
+        automatic.title = 'Pick a color that no other group uses'
+        actions.append(automatic, this.button('Cancel', 'secondary', () => this.closeSenderTagEditor()), this.button('Confirm', 'primary', apply))
+
+        editor.append(title, current, preview, swatches, customRow, error, actions)
+        overlay.appendChild(editor)
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) {
+                this.closeSenderTagEditor()
+            }
+        })
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                this.closeSenderTagEditor()
+            } else if (event.key === 'Enter' && !event.isComposing) {
+                event.preventDefault()
+                apply()
+            }
+        })
+        select(selected)
+        this.senderTagEditor = overlay
+        document.body.appendChild(overlay)
+        requestAnimationFrame(() => hexInput.focus())
+    }
+
+    private async setGroupColor (group: string, color: string|null): Promise<void> {
+        this.config.store.aiTerminal.senderGroupColors = this.withGroupColor(group, color)
+        await this.config.save()
+        this.renderSavedCommandTabs()
+    }
+
+    /** senderGroupColors with the color of one group set (or removed with null) */
+    private withGroupColor (group: string, color: string|null): Record<string, string> {
+        const colors = Object.entries(this.config.store.aiTerminal.senderGroupColors ?? {}).filter(([name]) => name !== group)
+        if (color) {
+            colors.push([group, color])
+        }
+        return Object.fromEntries(colors) as Record<string, string>
     }
 
     /** Puts every command of the group into the Sender, one per line, ready for Send all */
@@ -2656,6 +2898,13 @@ export class AITerminalPanel {
         if (this.config.store.aiTerminal.senderGroupFilter === from) {
             this.config.store.aiTerminal.senderGroupFilter = to
         }
+        // The color moves with the name; when merging into an existing group, that group keeps its color
+        const fromColor = this.getChosenGroupColor(from)
+        const colors = this.withGroupColor(from, null)
+        if (fromColor && !this.getChosenGroupColor(to)) {
+            colors[to] = fromColor
+        }
+        this.config.store.aiTerminal.senderGroupColors = colors
         await this.setSavedSenderCommands(commands)
     }
 
@@ -2679,6 +2928,7 @@ export class AITerminalPanel {
                 delete item.group
             }
         }
+        this.config.store.aiTerminal.senderGroupColors = this.withGroupColor(group, null)
         await this.setSavedSenderCommands(commands)
     }
 
