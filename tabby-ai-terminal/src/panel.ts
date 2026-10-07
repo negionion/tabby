@@ -2,18 +2,45 @@ import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { Subscription } from 'rxjs'
 import { ConfigService, PlatformService } from 'tabby-core'
 import { AIProviderAuthService } from './services/aiProviderAuth.service'
-import { AIProviderRunnerService, AIProviderRunHandle } from './services/aiProviderRunner.service'
+import { AIProviderRunnerService, AIProviderRunHandle, AIToolPermissionRequest } from './services/aiProviderRunner.service'
 import { AI_PROVIDERS, AIProviderID, AIProviderStatus } from './providers'
 import { stripTerminalControlSequences, TerminalOutputSanitizer } from './terminalOutputSanitizer'
 
 const VISIBLE_OUTPUT_LINES = 14
 const ANALYSIS_PLACEHOLDER = 'Analysis will stream here from the captured session output.'
 const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
-const MAX_SAVED_SENDER_COMMANDS = 10
+const MAX_SAVED_SENDER_COMMANDS = 100
+const DEFAULT_PROMPT_PATTERN = '[#$>]\\s*$'
+const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
+    '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
+    '\\bmtd\\s+(-\\S+\\s+)*(erase|write|unlock)\\b', '\\bdd\\b.*\\bof=/dev/', '\\brm\\s+-\\w*[rf]', '\\bmkfs',
+    '\\buci\\s+(commit|import|batch)\\b', '\\bfw_setenv\\b', '^\\s*wifi(\\s+(up|down|reload))?\\s*$',
+    '/etc/init\\.d/\\S+\\s+(stop|restart|disable)\\b', '\\bkillall\\b', '\\bkill\\s+-9\\b',
+]
+const CLAUDE_MODE_LABELS: Partial<Record<string, string>> = { plan: 'Plan', manual: 'Manual', acceptEdits: 'Edit automatically', auto: 'Auto' }
 
 interface SavedSenderCommand {
     name?: string
     command: string
+}
+
+interface PendingPermission {
+    requestID: string
+    finish: (allowed: boolean, label: string) => void
+}
+
+interface AnswerRunInfo {
+    question: string
+    terminalOutput: string
+    provider: AIProviderID
+    startedAt: number
+    model: string
+    mode: string
+}
+
+interface LiveRenderState {
+    timer: ReturnType<typeof setTimeout>|null
+    view: HTMLElement|null
 }
 
 export class AITerminalPanel {
@@ -27,6 +54,14 @@ export class AITerminalPanel {
     private signedInIdentity: HTMLElement
     private providerSelect: HTMLSelectElement
     private modelSelect: HTMLSelectElement
+    private modeSelect: HTMLSelectElement
+    private effortSelect: HTMLSelectElement
+    private modelRow: HTMLElement
+    private modeRow: HTMLElement
+    private headerFooter: HTMLElement
+    private headerSummary: HTMLElement
+    private headerSummaryText: HTMLElement
+    private headerCollapseButton: HTMLButtonElement
     private statusLine: HTMLElement
     private loginOnly: HTMLElement
     private content: HTMLElement
@@ -48,10 +83,46 @@ export class AITerminalPanel {
     private latestOutputDetails: HTMLDetailsElement
     private latestOutputSummary: HTMLElement
     private latestOutputMeta: HTMLElement
+    private latestOutputPreview: HTMLElement
+    /** While true the captured output opens on an empty chat and closes after Analyze */
+    private latestOutputAuto = true
+    private emptyState: HTMLElement
+    private exampleRow: HTMLElement
+    private jumpLatestButton: HTMLButtonElement
     private output: HTMLTextAreaElement
-    private currentAnalysis: HTMLPreElement|null = null
+    private currentAnalysis: HTMLElement|null = null
+    private liveRenders = new WeakMap<HTMLElement, LiveRenderState>()
+    private answerViewer: HTMLElement|null = null
+    private questionHistory: string[] = []
+    private questionHistoryIndex = -1
+    private retryPayload: { question: string, terminalOutput: string }|null = null
+    private runningLabel: HTMLElement|null = null
+    private runningTimer: ReturnType<typeof setInterval>|null = null
+    private pendingPermissions: PendingPermission[] = []
     private savedCommandTabs: HTMLElement
     private draft: HTMLTextAreaElement
+    private senderTargetElement: HTMLElement|null = null
+    private senderNextPreview: HTMLElement
+    private senderClearButton: HTMLButtonElement
+    private senderLineButton: HTMLButtonElement
+    private senderAllButton: HTMLButtonElement
+    private senderStopButton: HTMLButtonElement
+    private senderBusy = false
+    private senderStopRequested = false
+    private senderForceOpen = false
+    private senderNotice = ''
+    private senderProgress = ''
+    private outputLineSeq = 0
+    private lineSeqAtSend = 0
+    private promptAtLineSeq = 0
+    private promptPatternSource: string|null = null
+    private promptPattern = /[#$>]\s*$/
+    private dangerousPatternSource: string[]|null = null
+    private dangerousPatterns: RegExp[] = []
+    private outputRenderTimer: ReturnType<typeof setTimeout>|null = null
+    private appliedFontSize = 0
+    private appliedPanelWidth = 0
+    private appliedSenderHeight = 0
     private recentOutputLines: string[] = []
     private pendingOutput = ''
     private outputSanitizer = new TerminalOutputSanitizer()
@@ -125,6 +196,12 @@ export class AITerminalPanel {
         this.modelSelect = document.createElement('select')
         this.modelSelect.className = 'form-control form-control-sm ai-model-select'
         this.modelSelect.addEventListener('change', () => {
+            if (this.modelSelect.value === '__recheck__') {
+                this.modelSelect.value = this.providerAuth.getSelectedModel()
+                this.providerAuth.clearClaudeModelCache()
+                void this.refreshModelOptions(true)
+                return
+            }
             this.providerAuth.setSelectedModel(this.modelSelect.value)
         })
         this.modelSelect.addEventListener('pointerdown', () => {
@@ -133,6 +210,20 @@ export class AITerminalPanel {
         this.modelSelect.addEventListener('focus', () => {
             void this.refreshModelOptions(true)
         })
+        this.modeSelect = this.createSettingSelect('claudeMode', [
+            ['plan', 'Plan (read-only)'],
+            ['manual', 'Manual'],
+            ['acceptEdits', 'Edit automatically'],
+            ['auto', 'Auto'],
+        ], 'plan', 'Plan: read-only\nManual: ask before every edit or command\nEdit automatically: accept edits in the selected folder\nAuto: Claude Code safety check decides, risky actions ask')
+        this.effortSelect = this.createSettingSelect('claudeEffort', [
+            ['auto', 'auto'],
+            ['low', 'low'],
+            ['medium', 'medium'],
+            ['high', 'high'],
+            ['xhigh', 'xhigh'],
+            ['max', 'max'],
+        ], 'auto', 'Reasoning effort')
         this.refreshModelOptions()
 
         this.statusLine = document.createElement('div')
@@ -145,7 +236,8 @@ export class AITerminalPanel {
 
         this.headerLogoutButton = this.button('Logout', 'danger', () => this.logout())
         this.loginOnlyLoginButton = this.button('Install / Login with Provider', 'primary', () => this.login())
-        this.clearLatestButton = this.button('Clear Latest', 'secondary', () => this.clearLatestSessionOutput())
+        this.clearLatestButton = this.button('Clear output', 'secondary', () => this.clearLatestSessionOutput())
+        this.clearLatestButton.title = 'Clear the captured output (nothing is sent)'
         this.resetSessionButton = this.button('Reset Session', 'secondary', () => this.resetSession())
         this.resetSessionButton.classList.add('ai-reset-session-button')
         this.referenceFolderButton = this.button('Select Folder', 'secondary', () => this.selectReferenceFolder())
@@ -158,13 +250,43 @@ export class AITerminalPanel {
         this.cancelButton.hidden = true
         this.runningIndicator = this.createRunningIndicator()
 
-        this.question = this.textarea('Example: help me analyze the recent hostapd disconnect', 3)
+        this.question = this.textarea('Ask about the output (Enter to send)', 1)
+        this.question.classList.add('ai-question-input')
+        this.question.title = 'Enter: send - Shift+Enter: new line - Up/Down: previous questions - Esc: cancel'
+        this.question.addEventListener('input', () => this.updateQuestionBox())
         this.question.addEventListener('keydown', event => {
-            if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+            if (event.isComposing) {
+                return
+            }
+            if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !this.question.value.includes('\n') && this.questionHistory.length) {
+                const atStart = this.question.selectionStart === 0 && this.question.selectionEnd === 0
+                const browsing = this.questionHistoryIndex !== -1
+                if (event.key === 'ArrowUp' && (atStart || !this.question.value || browsing)) {
+                    event.preventDefault()
+                    this.questionHistoryIndex = this.questionHistoryIndex === -1 ? this.questionHistory.length - 1 : Math.max(0, this.questionHistoryIndex - 1)
+                    this.question.value = this.questionHistory[this.questionHistoryIndex]
+                    this.updateQuestionBox()
+                    return
+                }
+                if (event.key === 'ArrowDown' && browsing) {
+                    event.preventDefault()
+                    this.questionHistoryIndex = this.questionHistoryIndex + 1 >= this.questionHistory.length ? -1 : this.questionHistoryIndex + 1
+                    this.question.value = this.questionHistoryIndex === -1 ? '' : this.questionHistory[this.questionHistoryIndex]
+                    this.updateQuestionBox()
+                    return
+                }
+            }
+            if (event.key !== 'Enter' || event.shiftKey) {
                 return
             }
             event.preventDefault()
             this.analyze()
+        })
+        this.element.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && this.runHandle) {
+                event.preventDefault()
+                this.cancelAnalyze()
+            }
         })
         this.chatBody = document.createElement('div')
         this.chatBody.className = 'ai-chat-body'
@@ -174,7 +296,36 @@ export class AITerminalPanel {
         this.chatViewport.className = 'ai-chat-viewport'
         this.chatViewport.addEventListener('scroll', () => {
             this.chatAutoScroll = this.isChatScrolledToBottom()
+            if (this.chatAutoScroll) {
+                this.jumpLatestButton.hidden = true
+            }
         })
+        this.jumpLatestButton = this.button('↓ Latest', 'primary', () => {
+            this.jumpLatestButton.hidden = true
+            this.scrollChatToBottom(true)
+        })
+        this.jumpLatestButton.classList.add('ai-jump-latest')
+        this.jumpLatestButton.hidden = true
+        this.emptyState = document.createElement('div')
+        this.emptyState.className = 'ai-empty-state'
+        this.emptyState.textContent = 'Output from this tab is captured automatically and shown in "Output to send". Ask a question, or press Analyze to explain the latest output.'
+        this.exampleRow = document.createElement('div')
+        this.exampleRow.className = 'ai-example-row'
+        for (const [label, prompt] of [
+            ['Analyze output', ''],
+            ['Why did the STA disconnect?', 'Why did the STA disconnect?'],
+            ['Summarize errors', 'Summarize the errors and warnings in the output.'],
+        ]) {
+            const chip = document.createElement('button')
+            chip.type = 'button'
+            chip.className = 'ai-example-chip'
+            chip.textContent = label
+            chip.addEventListener('click', () => {
+                this.question.value = prompt
+                void this.analyze()
+            })
+            this.exampleRow.appendChild(chip)
+        }
         this.chatHistory = document.createElement('div')
         this.chatHistory.className = 'ai-chat-history'
 
@@ -185,11 +336,17 @@ export class AITerminalPanel {
         this.output.rows = VISIBLE_OUTPUT_LINES
         this.output.addEventListener('input', () => this.updateLatestOutputFromEditor())
         this.output.addEventListener('blur', () => this.render())
-        const latestOutput = this.collapsibleOutput('Latest Session Output', this.output)
+        const latestOutput = this.collapsibleOutput('Output to send', this.output)
         this.latestOutputDetails = latestOutput.details
         this.latestOutputSummary = latestOutput.summary
         this.latestOutputMeta = latestOutput.meta
         this.latestOutputDetails.classList.add('ai-latest-output')
+        this.latestOutputPreview = document.createElement('span')
+        this.latestOutputPreview.className = 'ai-output-preview'
+        this.latestOutputMeta.before(this.latestOutputPreview)
+        this.latestOutputSummary.addEventListener('click', () => {
+            this.latestOutputAuto = false
+        })
         this.latestOutputDetails.addEventListener('toggle', () => {
             this.render()
             if (this.latestOutputDetails.open) {
@@ -197,9 +354,9 @@ export class AITerminalPanel {
             }
         })
 
-        this.chatViewport.append(this.chatHistory)
-        this.chatStack.append(this.chatViewport, this.latestOutputDetails)
-        this.chatBody.append(this.chatStack, this.question)
+        this.chatViewport.append(this.emptyState, this.chatHistory)
+        this.chatStack.append(this.chatViewport, this.jumpLatestButton, this.latestOutputDetails)
+        this.chatBody.append(this.chatStack, this.exampleRow, this.question)
 
         this.savedCommandTabs = document.createElement('div')
         this.savedCommandTabs.className = 'ai-saved-command-tabs'
@@ -211,18 +368,76 @@ export class AITerminalPanel {
             const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
             this.savedCommandTabs.scrollLeft += delta
         }, { passive: false })
-        this.draft = this.textarea('Commands staged here will be sent to the terminal', 6)
+        this.draft = this.textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
+        this.draft.addEventListener('input', () => this.updateSenderState())
+        this.draft.addEventListener('focus', () => this.updateSenderState())
+        this.draft.addEventListener('blur', () => {
+            this.senderForceOpen = false
+            this.updateSenderState()
+        })
         this.renderSavedCommandTabs()
-        this.configSubscription = this.config.changed$.subscribe(() => this.renderSavedCommandTabs())
+        this.configSubscription = this.config.changed$.subscribe(() => {
+            this.renderSavedCommandTabs()
+            this.updateHeaderSummary()
+            // Settings saved elsewhere (e.g. font size) must apply without waiting for terminal output
+            if (this.getFontSize() !== this.appliedFontSize) {
+                this.applyFontSize()
+                if (this.visible) {
+                    this.updateQuestionBox()
+                    this.scheduleDynamicLayoutUpdate()
+                }
+            }
+        })
 
+        this.resetSessionButton.textContent = 'New session'
+        this.resetSessionButton.title = 'Start a new conversation'
+        this.headerLogoutButton.className = 'btn btn-sm btn-outline-danger'
+        this.headerLogoutButton.title = 'Sign out of the provider CLI'
         this.headerControls.append(
             this.providerSelect,
-            this.modelSelect,
             this.resetSessionButton,
             this.headerLogoutButton,
         )
-        this.referenceFolderRow.append(this.referenceFolderPathElement, this.clearReferenceFolderButton, this.referenceFolderButton)
-        this.header.append(this.signedInIdentity, this.headerControls, this.referenceFolderRow)
+        this.headerCollapseButton = document.createElement('button')
+        this.headerCollapseButton.type = 'button'
+        this.headerCollapseButton.className = 'ai-header-chevron'
+        this.headerCollapseButton.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        this.headerCollapseButton.addEventListener('click', event => {
+            event.stopPropagation()
+            this.setHeaderCollapsed(!this.header.classList.contains('is-collapsed'))
+        })
+        this.headerFooter = document.createElement('div')
+        this.headerFooter.className = 'ai-header-footer'
+        this.headerSummary = document.createElement('div')
+        this.headerSummary.className = 'ai-header-summary'
+        this.headerSummary.title = 'Click to show settings'
+        this.headerSummaryText = document.createElement('span')
+        this.headerSummaryText.className = 'ai-header-summary-text'
+        const summaryNewSession = this.button('New session', 'secondary', event => {
+            event.stopPropagation()
+            void this.resetSession()
+        })
+        summaryNewSession.title = 'Start a new conversation'
+        this.headerSummary.append(this.headerSummaryText, summaryNewSession)
+        this.headerSummary.addEventListener('click', () => this.setHeaderCollapsed(false))
+        this.modelRow = this.labeledRow([['Model', this.modelSelect]])
+        this.modeRow = this.labeledRow([['Mode', this.modeSelect], ['Effort', this.effortSelect]])
+        const folderLabel = document.createElement('span')
+        folderLabel.className = 'ai-header-label'
+        folderLabel.textContent = 'Folder'
+        this.clearReferenceFolderButton.textContent = '×'
+        this.clearReferenceFolderButton.title = 'Clear folder'
+        this.referenceFolderRow.append(folderLabel, this.referenceFolderPathElement, this.referenceFolderButton, this.clearReferenceFolderButton)
+        this.headerFooter.append(this.signedInIdentity)
+        this.header.append(
+            this.headerSummary,
+            this.headerControls,
+            this.modelRow,
+            this.modeRow,
+            this.referenceFolderRow,
+            this.headerFooter,
+            this.headerCollapseButton,
+        )
 
         this.loginOnly.append(
             this.section('AI Provider', this.statusLine, [
@@ -233,19 +448,42 @@ export class AITerminalPanel {
 
         const chatSection = this.section('AI Chat Panel', this.chatBody, [this.clearLatestButton, this.runningIndicator, this.analyzeButton, this.cancelButton])
         chatSection.classList.add('ai-chat-section')
+        chatSection.querySelector(':scope > .ai-panel-title')?.remove()
         this.content.append(chatSection)
 
+        this.senderNextPreview = document.createElement('span')
+        this.senderNextPreview.className = 'ai-sender-next'
+        this.senderClearButton = this.button('Clear', 'secondary', () => {
+            this.draft.value = ''
+            this.senderNotice = ''
+            this.updateSenderState()
+        })
+        this.senderLineButton = this.button('Send next', 'success', () => this.sendDraftLine())
+        this.senderAllButton = this.button('Send all', 'success', () => this.sendDraftAll())
+        this.senderStopButton = this.button('Stop', 'danger', () => {
+            this.senderStopRequested = true
+        })
+        this.senderStopButton.hidden = true
         this.senderElement.append(
             this.senderSection(this.draft, [
-                this.button('Clear', 'secondary', () => {
-                    this.draft.value = ''
-                }),
-                this.button('Send Line', 'success', () => this.sendDraftLine()),
-                this.button('Send All', 'success', () => this.sendDraftAll()),
+                this.senderNextPreview,
+                this.senderClearButton,
+                this.senderLineButton,
+                this.senderAllButton,
+                this.senderStopButton,
             ]),
         )
+        this.senderElement.addEventListener('click', () => {
+            if (this.tab.element.nativeElement.classList.contains('ai-terminal-sender-collapsed')) {
+                this.senderForceOpen = true
+                this.updateSenderState()
+                setTimeout(() => this.draft.focus())
+            }
+        })
 
         this.element.append(this.header, this.loginOnly, this.content)
+        this.installResizeHandle(this.element, 'x')
+        this.installResizeHandle(this.senderElement, 'y')
         this.observeDynamicLayout()
         this.applyProviderStatus({
             provider: this.providerAuth.getSelectedProvider(),
@@ -253,11 +491,17 @@ export class AITerminalPanel {
             label: 'Checking provider status...',
         })
         this.render()
+        this.updateSenderState()
     }
 
     destroy (): void {
         this.cancelAnalyze()
         this.closeSenderTagEditor()
+        this.closeAnswerViewer()
+        if (this.outputRenderTimer) {
+            clearTimeout(this.outputRenderTimer)
+            this.outputRenderTimer = null
+        }
         this.layoutObserver?.disconnect()
         if (this.layoutFrame !== null) {
             cancelAnimationFrame(this.layoutFrame)
@@ -283,14 +527,33 @@ export class AITerminalPanel {
         while (newlineIndex !== -1) {
             const line = this.pendingOutput.slice(0, newlineIndex)
             this.appendOutputLine(line)
+            this.outputLineSeq++
             this.pendingOutput = this.pendingOutput.slice(newlineIndex + 1)
             newlineIndex = this.pendingOutput.indexOf('\n')
         }
-        const shouldStickToBottom = this.latestOutputDetails.open && this.isLatestOutputScrolledToBottom()
-        this.render()
-        if (shouldStickToBottom) {
-            this.scrollLatestOutputToBottom()
+        // While "Send all" is waiting, remember when a shell prompt appears after new output lines
+        if (this.senderBusy && this.pendingOutput.length < 300 && this.getPromptPattern().test(this.normalizeOutputLine(this.pendingOutput))) {
+            this.promptAtLineSeq = this.outputLineSeq
         }
+        this.scheduleOutputRender()
+    }
+
+    /** Output is only recorded while the panel is hidden; when visible, re-render at most every 100 ms */
+    private scheduleOutputRender (): void {
+        if (!this.visible || this.outputRenderTimer) {
+            return
+        }
+        this.outputRenderTimer = setTimeout(() => {
+            this.outputRenderTimer = null
+            if (!this.visible) {
+                return
+            }
+            const shouldStickToBottom = this.latestOutputDetails.open && this.isLatestOutputScrolledToBottom()
+            this.render()
+            if (shouldStickToBottom) {
+                this.scrollLatestOutputToBottom()
+            }
+        }, 100)
     }
 
     handleInput (data: string|Buffer): void {
@@ -311,6 +574,7 @@ export class AITerminalPanel {
         this.render()
 
         if (this.visible) {
+            this.updateQuestionBox()
             if (this.shouldRefreshAfterFocus()) {
                 this.refreshAfterFocus()
             } else if (this.lastProviderStatus?.state === 'checking') {
@@ -328,17 +592,42 @@ export class AITerminalPanel {
         if (this.runHandle) {
             return
         }
-        this.flushPendingOutput()
-        this.skipNextEmptyInputOutputLine = false
-        this.trimRecentOutput()
-        const question = this.redactSensitiveText(this.question.value.trim())
-        const terminalOutput = this.redactSensitiveText(this.getRecentOutputText())
+        const retry = this.retryPayload
+        this.retryPayload = null
+        let question = ''
+        let terminalOutput = ''
+        if (retry) {
+            question = retry.question
+            terminalOutput = retry.terminalOutput
+        } else {
+            this.flushPendingOutput()
+            this.skipNextEmptyInputOutputLine = false
+            this.trimRecentOutput()
+            question = this.redactSensitiveText(this.question.value.trim())
+            terminalOutput = this.redactSensitiveText(this.getRecentOutputText())
+            if (question && this.questionHistory[this.questionHistory.length - 1] !== question) {
+                this.questionHistory.push(question)
+                this.questionHistory = this.questionHistory.slice(-50)
+            }
+            this.questionHistoryIndex = -1
+        }
         this.currentAnalysis = this.appendSentChatMessage(question, terminalOutput)
-        this.clearLatestSessionOutput()
-        this.draft.value = ''
+        this.latestOutputAuto = true
+        if (!retry) {
+            this.clearLatestSessionOutput()
+        }
+        this.latestOutputDetails.open = false
         this.setRunning(true)
         const provider = this.providerAuth.getSelectedProvider()
         const runGeneration = ++this.runGeneration
+        const runInfo: AnswerRunInfo = {
+            question,
+            terminalOutput,
+            provider,
+            startedAt: Date.now(),
+            model: this.providerAuth.getSelectedModel(),
+            mode: this.getEffectiveModeLabel(provider),
+        }
 
         try {
             this.runHandle = this.providerRunner.run(
@@ -365,6 +654,8 @@ export class AITerminalPanel {
                             this.appendAnalysis(chunk)
                         }
                     },
+                    permission: (request, requestID) => runGeneration === this.runGeneration ? this.askPermission(request, requestID) : Promise.resolve(false),
+                    permissionCancel: requestID => this.dismissPermission(requestID),
                     done: code => {
                         if (runGeneration !== this.runGeneration) {
                             return
@@ -373,12 +664,18 @@ export class AITerminalPanel {
                             const definition = AI_PROVIDERS.find(item => item.id === provider)
                             this.appendAnalysis(`\n${definition?.label ?? 'AI provider'} exited with code ${code}.\n`)
                         }
+                        this.finishPendingPermissions()
+                        this.finalizeAnalysis(this.currentAnalysis)
+                        this.decorateAnswerCard(this.currentAnalysis, runInfo, code)
                         this.runHandle = null
                         this.setRunning(false)
                     },
                 },
             )
-            this.question.value = ''
+            if (!retry) {
+                this.question.value = ''
+                this.updateQuestionBox()
+            }
             this.currentInputLine = ''
             this.skipNextEmptyInputOutputLine = false
             this.render()
@@ -389,8 +686,95 @@ export class AITerminalPanel {
         }
     }
 
+    private createSettingSelect (key: string, options: [string, string][], fallback: string, title: string): HTMLSelectElement {
+        const select = document.createElement('select')
+        select.className = 'form-control form-control-sm ai-model-select'
+        select.title = title
+        for (const [value, label] of options) {
+            select.appendChild(this.modelOption(value, label))
+        }
+        const current = this.config.store.aiTerminal[key]
+        select.value = options.some(([value]) => value === current) ? current : fallback
+        select.addEventListener('change', () => {
+            this.config.store.aiTerminal[key] = select.value
+            void this.config.save()
+        })
+        return select
+    }
+
+    private askPermission (request: AIToolPermissionRequest, requestID: string): Promise<boolean> {
+        return new Promise(resolve => {
+            const card = document.createElement('div')
+            card.className = 'ai-permission-card'
+            const title = document.createElement('div')
+            title.className = 'ai-permission-title'
+            title.textContent = `Allow ${request.display_name ?? request.tool_name}?`
+            const detail = document.createElement('pre')
+            detail.className = 'ai-permission-detail'
+            detail.textContent = this.describePermission(request)
+            const actions = document.createElement('div')
+            actions.className = 'ai-permission-actions'
+            const item: PendingPermission = {
+                requestID,
+                finish: (allowed, label) => {
+                    this.pendingPermissions = this.pendingPermissions.filter(other => other !== item)
+                    const status = document.createElement('span')
+                    status.className = 'ai-permission-status'
+                    status.textContent = label
+                    actions.replaceChildren(status)
+                    resolve(allowed)
+                },
+            }
+            actions.append(
+                this.button('Allow', 'success', () => item.finish(true, 'Allowed')),
+                this.button('Deny', 'danger', () => item.finish(false, 'Denied')),
+            )
+            card.append(title, detail, actions)
+            this.chatHistory.appendChild(card)
+            this.pendingPermissions = [...this.pendingPermissions, item]
+            this.scrollChatToBottom(true)
+        })
+    }
+
+    private describePermission (request: AIToolPermissionRequest): string {
+        const input = request.input ?? {}
+        if (typeof input.command === 'string') {
+            return input.description ? `${input.command}\n# ${input.description}` : input.command
+        }
+        const parts: string[] = []
+        if (input.file_path) {
+            parts.push(input.file_path)
+        }
+        if (typeof input.old_string === 'string') {
+            parts.push(`- ${input.old_string.slice(0, 400)}`)
+        }
+        if (typeof input.new_string === 'string') {
+            parts.push(`+ ${input.new_string.slice(0, 400)}`)
+        }
+        if (typeof input.content === 'string') {
+            parts.push(input.content.slice(0, 400))
+        }
+        return parts.length ? parts.join('\n') : JSON.stringify(input, null, 2).slice(0, 800)
+    }
+
+    /** Pending approval cards are denied when the run ends or is cancelled */
+    private finishPendingPermissions (): void {
+        for (const item of [...this.pendingPermissions]) {
+            item.finish(false, 'Cancelled')
+        }
+    }
+
+    private dismissPermission (requestID: string): void {
+        for (const item of [...this.pendingPermissions]) {
+            if (item.requestID === requestID) {
+                item.finish(false, 'Cancelled')
+            }
+        }
+    }
+
     private cancelAnalyze (): void {
         this.runGeneration++
+        this.finishPendingPermissions()
         this.runHandle?.cancel()
         this.runHandle = null
         this.setRunning(false)
@@ -406,34 +790,64 @@ export class AITerminalPanel {
             analysis.textContent = ''
         }
         analysis.textContent = `${analysis.textContent}${chunk}`
-        this.syncDraftFromAnalysisCodeBlock(analysis.textContent ?? '')
+        this.scheduleLiveRender(analysis)
         this.scrollChatToBottom()
     }
 
-    private syncDraftFromAnalysisCodeBlock (analysisText: string): void {
-        const commandBlock = this.extractLastCodeBlock(analysisText)
-        if (commandBlock === null) {
+    /** Renders the streaming answer as markdown at most every 200 ms; the raw text stays in the hidden <pre> */
+    private scheduleLiveRender (analysis: HTMLElement): void {
+        if (analysis.tagName !== 'PRE') {
             return
         }
-        this.draft.value = commandBlock
-    }
-
-    private extractLastCodeBlock (text: string): string|null {
-        const blocks = [...text.matchAll(/```[^\r\n`]*(?:\r?\n)?([\s\S]*?)```/g)]
-        if (!blocks.length) {
-            return null
+        let state = this.liveRenders.get(analysis)
+        if (!state) {
+            state = { timer: null, view: null }
+            this.liveRenders.set(analysis, state)
         }
-        const lastBlock = blocks[blocks.length - 1][1].trim()
-        return lastBlock || null
+        if (state.timer) {
+            return
+        }
+        const live = state
+        live.timer = setTimeout(() => {
+            live.timer = null
+            if (!analysis.isConnected) {
+                return
+            }
+            if (!live.view) {
+                live.view = document.createElement('div')
+                live.view.className = 'ai-analysis ai-chat-analysis ai-markdown'
+                analysis.after(live.view)
+                analysis.hidden = true
+            }
+            live.view.replaceChildren(...Array.from(this.renderMarkdown(analysis.textContent ?? '').childNodes))
+            this.scrollChatToBottom()
+        }, 200)
     }
 
     private setRunning (running: boolean): void {
+        if (this.runningTimer) {
+            clearInterval(this.runningTimer)
+            this.runningTimer = null
+        }
+        const label = this.runningLabel
+        if (label) {
+            label.textContent = 'Thinking...'
+            if (running) {
+                const started = Date.now()
+                this.runningTimer = setInterval(() => {
+                    label.textContent = `Thinking... ${Math.floor((Date.now() - started) / 1000)}s`
+                }, 1000)
+            }
+        }
+        this.cancelButton.title = 'Cancel (Esc)'
         this.analyzeButton.disabled = running
         this.cancelButton.hidden = !running
         this.runningIndicator.classList.toggle('is-active', running)
         this.runningIndicator.setAttribute('aria-hidden', running ? 'false' : 'true')
         this.question.disabled = running
         this.modelSelect.disabled = running
+        this.modeSelect.disabled = running
+        this.effortSelect.disabled = running
         this.headerLogoutButton.disabled = running
         this.clearLatestButton.disabled = running
         this.resetSessionButton.disabled = running
@@ -456,20 +870,118 @@ export class AITerminalPanel {
         }
 
         const lines = this.getDisplayOutputLines()
+        const chatEmpty = this.chatHistory.childElementCount === 0
+        if (this.latestOutputAuto) {
+            // Open the captured output on an empty chat; keep it closed after an answer
+            const shouldOpen = chatEmpty && lines.length > 0
+            if (this.latestOutputDetails.open !== shouldOpen) {
+                this.latestOutputDetails.open = shouldOpen
+            }
+        }
+        const hideEmptyState = !chatEmpty || lines.length > 0
+        if (this.emptyState.hidden !== hideEmptyState) {
+            this.emptyState.hidden = hideEmptyState
+        }
+        if (this.exampleRow.hidden !== !chatEmpty) {
+            this.exampleRow.hidden = !chatEmpty
+        }
         const outputLines = this.latestOutputDetails.open ? lines : lines.slice(-VISIBLE_OUTPUT_LINES)
         const outputText = outputLines.join('\n')
         if (document.activeElement !== this.output && this.output.value !== outputText) {
             this.output.value = outputText
         }
         this.latestOutputMeta.textContent = this.formatLineCount(lines.length)
+        const preview = this.latestOutputDetails.open ? 'editable' : lines.length ? lines[lines.length - 1].trim() : ''
+        if (this.latestOutputPreview.textContent !== preview) {
+            this.latestOutputPreview.textContent = preview
+            this.latestOutputPreview.title = this.latestOutputDetails.open ? 'You can edit this text - exactly this is sent with your question' : preview
+        }
+        this.latestOutputPreview.classList.toggle('is-hint', this.latestOutputDetails.open)
+        this.updateAnalyzeLabel()
+        if (this.senderTargetElement && this.senderTargetElement.textContent !== `→ ${this.getTargetLabel()}`) {
+            this.updateSenderState()
+        }
         this.renderReferenceFolder()
+        this.updateHeaderSummary()
         this.scheduleDynamicLayoutUpdate()
+    }
+
+    private applyPanelSize (): void {
+        const store = this.config.store.aiTerminal
+        const width = Math.max(260, Math.min(2000, Math.round(Number(store.panelWidth) || 360)))
+        const height = Math.max(100, Math.min(1500, Math.round(Number(store.senderHeight) || 178)))
+        if (width === this.appliedPanelWidth && height === this.appliedSenderHeight) {
+            return
+        }
+        this.appliedPanelWidth = width
+        this.appliedSenderHeight = height
+        for (const element of [this.tab.element.nativeElement, this.element, this.senderElement]) {
+            element.style.setProperty('--ai-panel-width', `${width}px`)
+            element.style.setProperty('--ai-sender-height', `${height}px`)
+        }
+    }
+
+    /** Drag the panel's left edge (x) or the sender's top edge (y); double-click resets the size */
+    private installResizeHandle (parent: HTMLElement, axis: 'x'|'y'): void {
+        const handle = document.createElement('div')
+        handle.className = axis === 'x' ? 'ai-resize-handle-x' : 'ai-resize-handle-y'
+        handle.title = 'Drag to resize, double-click to reset'
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            const store = this.config.store.aiTerminal
+            const startPos = axis === 'x' ? event.clientX : event.clientY
+            const startSize = axis === 'x' ? this.element.getBoundingClientRect().width : this.senderElement.getBoundingClientRect().height
+            const host = this.tab.element.nativeElement.getBoundingClientRect()
+            handle.classList.add('ai-resizing')
+            try {
+                handle.setPointerCapture(event.pointerId)
+            } catch { }
+            const move = (moveEvent: PointerEvent) => {
+                const delta = startPos - (axis === 'x' ? moveEvent.clientX : moveEvent.clientY)
+                if (axis === 'x') {
+                    store.panelWidth = Math.round(Math.max(260, Math.min(host.width - 200, startSize + delta)))
+                } else {
+                    store.senderHeight = Math.round(Math.max(100, Math.min(host.height - 160, startSize + delta)))
+                }
+                this.applyPanelSize()
+            }
+            const end = () => {
+                handle.removeEventListener('pointermove', move)
+                handle.removeEventListener('pointerup', end)
+                handle.removeEventListener('pointercancel', end)
+                handle.classList.remove('ai-resizing')
+                void this.config.save()
+                this.requestTerminalRefit()
+            }
+            handle.addEventListener('pointermove', move)
+            handle.addEventListener('pointerup', end)
+            handle.addEventListener('pointercancel', end)
+        })
+        handle.addEventListener('dblclick', event => {
+            event.stopPropagation()
+            const store = this.config.store.aiTerminal
+            if (axis === 'x') {
+                store.panelWidth = 360
+            } else {
+                store.senderHeight = 178
+            }
+            this.applyPanelSize()
+            void this.config.save()
+            this.requestTerminalRefit()
+        })
+        parent.appendChild(handle)
     }
 
     private applyFontSize (): void {
         const fontSize = this.getFontSize()
+        this.appliedFontSize = fontSize
         this.element.style.setProperty('--ai-terminal-font-size', `${fontSize}px`)
         this.senderElement.style.setProperty('--ai-terminal-font-size', `${fontSize}px`)
+        this.applyPanelSize()
     }
 
     private getFontSize (): number {
@@ -585,6 +1097,8 @@ export class AITerminalPanel {
         this.signedInIdentity.hidden = !signedIn
         this.providerSelect.hidden = false
         this.modelSelect.hidden = !signedIn
+        this.modelRow.style.display = signedIn ? '' : 'none'
+        this.modeRow.style.display = signedIn && status.provider === 'claude' ? '' : 'none'
         this.resetSessionButton.hidden = !signedIn
         this.headerLogoutButton.hidden = !signedIn
         this.referenceFolderRow.hidden = !signedIn
@@ -633,8 +1147,8 @@ export class AITerminalPanel {
         const providerID = this.lastProviderStatus?.provider ?? this.providerAuth.getSelectedProvider()
         const provider = AI_PROVIDERS.find(item => item.id === providerID)
         const providerLabel = provider?.label ?? providerID
-        this.signedInIdentity.textContent = this.signedIn ? `${providerLabel} - ${this.aiSessionID ?? 'new session'}` : providerLabel
-        this.signedInIdentity.title = this.signedInIdentity.textContent ?? ''
+        this.signedInIdentity.textContent = this.signedIn ? `Session: ${this.aiSessionID ? `${this.aiSessionID.slice(0, 8)}…` : 'new'}` : providerLabel
+        this.signedInIdentity.title = this.aiSessionID ? `${providerLabel} session ${this.aiSessionID}` : `${providerLabel} - new session`
     }
 
     private shouldRefreshAfterFocus (): boolean {
@@ -657,6 +1171,11 @@ export class AITerminalPanel {
     private async refreshModelOptionsNow (force = false): Promise<void> {
         const provider = AI_PROVIDERS.find(item => item.id === this.providerSelect.value) ?? AI_PROVIDERS[0]
         const selectedModel = this.providerAuth.getSelectedModel()
+        // Also called from the constructor before the header rows exist
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (this.modeRow) {
+            this.modeRow.style.display = this.signedIn && provider.id === 'claude' ? '' : 'none'
+        }
         this.modelSelect.replaceChildren()
         this.modelSelect.appendChild(this.modelOption(selectedModel, selectedModel === 'auto' ? 'Auto model' : selectedModel))
         this.modelSelect.value = selectedModel
@@ -665,9 +1184,37 @@ export class AITerminalPanel {
         const modelOptions = models.includes(selectedModel) ? models : [selectedModel, ...models]
         this.modelSelect.replaceChildren()
         for (const model of modelOptions) {
-            this.modelSelect.appendChild(this.modelOption(model, model === 'auto' ? 'Auto model' : model))
+            this.modelSelect.appendChild(this.decorateModelOption(provider.id, this.modelOption(model, model === 'auto' ? 'Auto model' : model)))
+        }
+        if (provider.id === 'claude') {
+            this.modelSelect.appendChild(this.modelOption('__recheck__', '↻ Re-check model availability'))
         }
         this.modelSelect.value = selectedModel
+    }
+
+    /** Marks probed Claude models: resolved alias, unavailable (disabled) or check failed */
+    private decorateModelOption (providerID: AIProviderID, option: HTMLOptionElement): HTMLOptionElement {
+        if (providerID !== 'claude' || option.value === 'auto') {
+            return option
+        }
+        const status = this.providerAuth.getClaudeModelStatus(option.value)
+        if (!status) {
+            return option
+        }
+        if (status.state === 'ok') {
+            if (status.resolved && status.resolved !== option.value) {
+                option.textContent = `${option.value} → ${status.resolved}`
+            }
+        } else if (status.state === 'unavailable') {
+            option.textContent = `${option.value} (unavailable)`
+            option.disabled = true
+        } else {
+            option.textContent = `${option.value} (check failed)`
+        }
+        if (status.reason) {
+            option.title = status.reason
+        }
+        return option
     }
 
     private modelOption (value: string, label: string): HTMLOptionElement {
@@ -690,7 +1237,7 @@ export class AITerminalPanel {
         output.textContent = terminalOutput || EMPTY_OUTPUT_TEXT
 
         const sentOutput = this.collapsibleOutput(
-            'Session Output Sent',
+            'Output sent',
             output,
             this.formatLineCount(this.countOutputLines(terminalOutput)),
         )
@@ -699,64 +1246,772 @@ export class AITerminalPanel {
         const analysisBlock = document.createElement('div')
         analysisBlock.className = 'ai-analysis-block'
 
+        const answerHead = document.createElement('div')
+        answerHead.className = 'ai-answer-head'
         const analysisLabel = document.createElement('div')
         analysisLabel.className = 'ai-message-label'
-        analysisLabel.textContent = 'Analysis'
+        analysisLabel.textContent = this.providerAuth.getSelectedProvider() === 'claude' ? 'Claude' : 'Codex'
+        const answerMeta = document.createElement('span')
+        answerMeta.className = 'ai-answer-meta'
+        const answerActions = document.createElement('span')
+        answerActions.className = 'ai-answer-actions'
+        answerHead.append(analysisLabel, answerMeta, answerActions)
 
         const analysis = document.createElement('pre')
         analysis.className = 'ai-analysis ai-chat-analysis'
         analysis.textContent = ANALYSIS_PLACEHOLDER
 
-        analysisBlock.append(analysisLabel, analysis)
+        analysisBlock.append(answerHead, analysis)
         card.append(prompt, sentOutput.details, analysisBlock)
         this.chatHistory.appendChild(card)
         this.scrollChatToBottom(true)
         return analysis
     }
 
-    private sendDraftLine (): void {
-        const lines = this.draft.value.split(/\r?\n/)
-        const index = lines.findIndex(line => line.trim().length > 0)
-        if (index === -1) {
-            return
-        }
-
-        this.handleInput(`${lines[index].trimEnd()}\r`)
-        this.tab.sendInput(`${lines[index].trimEnd()}\r`)
-        lines.splice(index, 1)
-        this.draft.value = lines.join('\n').replace(/^\n+/, '')
-    }
-
-    private sendDraftAll (): void {
-        const lines = this.draft.value
+    private getDraftCommandLines (): string[] {
+        return this.draft.value
             .split(/\r?\n/)
             .map(line => line.trimEnd())
             .filter(line => line.trim().length > 0)
+    }
 
-        for (const line of lines) {
-            this.handleInput(`${line}\r`)
-            this.tab.sendInput(`${line}\r`)
+    private removeFirstDraftLine (): void {
+        const lines = this.draft.value.split(/\r?\n/)
+        const index = lines.findIndex(line => line.trim().length > 0)
+        if (index !== -1) {
+            lines.splice(index, 1)
         }
-        this.draft.value = ''
+        this.draft.value = lines.join('\n').replace(/^\n+/, '')
+    }
+
+    private sendToTerminal (line: string): void {
+        this.lineSeqAtSend = this.outputLineSeq
+        this.handleInput(`${line}\r`)
+        this.tab.sendInput(`${line}\r`)
+    }
+
+    private getTargetLabel (): string {
+        return this.tab.customTitle || this.tab.title || 'this tab'
+    }
+
+    private getDangerousPatterns (): RegExp[] {
+        const configured = this.config.store.aiTerminal.dangerousCommandPatterns
+        const sources: string[] = Array.isArray(configured) ? configured : DEFAULT_DANGEROUS_COMMAND_PATTERNS
+        if (this.dangerousPatternSource !== sources) {
+            this.dangerousPatternSource = sources
+            this.dangerousPatterns = sources.map(source => {
+                try {
+                    return new RegExp(source, 'i')
+                } catch {
+                    return null
+                }
+            }).filter((pattern): pattern is RegExp => !!pattern)
+        }
+        return this.dangerousPatterns
+    }
+
+    /** Asks before sending commands that reboot, erase or reconfigure the device */
+    private async confirmDangerousCommands (lines: string[]): Promise<boolean> {
+        const patterns = this.getDangerousPatterns()
+        const risky = lines.filter(line => patterns.some(pattern => pattern.test(line)))
+        if (!risky.length) {
+            return true
+        }
+        const result = await this.platform.showMessageBox({
+            type: 'warning',
+            message: `Send ${risky.length === 1 ? 'this command' : `these ${risky.length} commands`} to ${this.getTargetLabel()}?`,
+            detail: risky.join('\n'),
+            buttons: ['Send', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+        })
+        return result.response === 0
+    }
+
+    private getPromptPattern (): RegExp {
+        const source = this.config.store.aiTerminal.senderPromptPattern || DEFAULT_PROMPT_PATTERN
+        if (this.promptPatternSource !== source) {
+            this.promptPatternSource = source
+            try {
+                this.promptPattern = new RegExp(source)
+            } catch {
+                this.promptPattern = new RegExp(DEFAULT_PROMPT_PATTERN)
+            }
+        }
+        return this.promptPattern
+    }
+
+    /** Resolves once a shell prompt shows up after at least one new output line, or on stop/timeout */
+    private waitForPrompt (lineSeqAtSend: number): Promise<'prompt'|'stopped'|'timeout'> {
+        const timeout = Number(this.config.store.aiTerminal.senderLineTimeoutMs) || 20000
+        const started = Date.now()
+        return new Promise(resolve => {
+            const check = () => {
+                if (this.senderStopRequested) {
+                    resolve('stopped')
+                } else if (this.promptAtLineSeq > lineSeqAtSend) {
+                    setTimeout(() => resolve('prompt'), 50)
+                } else if (Date.now() - started > timeout) {
+                    resolve('timeout')
+                } else {
+                    setTimeout(check, 100)
+                }
+            }
+            check()
+        })
+    }
+
+    private async sendDraftLine (): Promise<void> {
+        const [line] = this.getDraftCommandLines()
+        if (!line || this.senderBusy || !await this.confirmDangerousCommands([line])) {
+            return
+        }
+        this.senderNotice = ''
+        this.sendToTerminal(line)
+        this.removeFirstDraftLine()
+        this.updateSenderState()
+    }
+
+    /** Sends the draft line by line, waiting for the shell prompt between lines */
+    private async sendDraftAll (): Promise<void> {
+        const lines = this.getDraftCommandLines()
+        if (!lines.length || this.senderBusy || !await this.confirmDangerousCommands(lines)) {
+            return
+        }
+        this.senderBusy = true
+        this.senderStopRequested = false
+        this.senderNotice = ''
+        try {
+            for (let index = 0; index < lines.length; index++) {
+                this.senderProgress = `${index + 1}/${lines.length}`
+                this.updateSenderState()
+                this.sendToTerminal(lines[index])
+                const sentAt = this.lineSeqAtSend
+                this.removeFirstDraftLine()
+                if (index === lines.length - 1) {
+                    break
+                }
+                const result = await this.waitForPrompt(sentAt)
+                if (result !== 'prompt') {
+                    this.senderNotice = result === 'stopped' ? 'Stopped' : 'Stopped: no shell prompt came back'
+                    break
+                }
+            }
+        } finally {
+            this.senderBusy = false
+            this.senderStopRequested = false
+            this.senderProgress = ''
+            this.updateSenderState()
+        }
+    }
+
+    private async sendSingleCommand (command: string): Promise<void> {
+        if (this.senderBusy || !await this.confirmDangerousCommands([command])) {
+            return
+        }
+        this.sendToTerminal(command)
+    }
+
+    private appendToDraft (text: string): void {
+        const current = this.draft.value.trimEnd()
+        this.draft.value = current ? `${current}\n${text}` : text
+        this.senderNotice = ''
+        this.updateSenderState()
+    }
+
+    private copyText (text: string): void {
+        this.platform.setClipboard({ text })
+    }
+
+    private updateSenderState (): void {
+        const lines = this.getDraftCommandLines()
+        const busy = this.senderBusy
+        this.draft.readOnly = busy
+        this.senderLineButton.disabled = busy || !lines.length
+        this.senderAllButton.disabled = busy || !lines.length
+        this.senderClearButton.disabled = busy || !this.draft.value
+        this.senderStopButton.hidden = !busy
+        this.senderAllButton.textContent = busy ? `Sending ${this.senderProgress}` : lines.length > 1 ? `Send all (${lines.length})` : 'Send all'
+        const preview = this.senderNotice || (lines.length ? `Next: ${lines[0]}` : '')
+        if (this.senderNextPreview.textContent !== preview) {
+            this.senderNextPreview.textContent = preview
+            this.senderNextPreview.title = preview
+        }
+        this.senderNextPreview.classList.toggle('is-notice', !!this.senderNotice)
+        const target = `→ ${this.getTargetLabel()}`
+        if (this.senderTargetElement && this.senderTargetElement.textContent !== target) {
+            this.senderTargetElement.textContent = target
+            this.senderTargetElement.title = `Commands are sent to ${this.getTargetLabel()}`
+        }
+        // An empty sender shrinks to one input line unless disabled in the config
+        const collapsed = this.config.store.aiTerminal.senderAutoCollapse !== false
+            && !lines.length && !this.draft.value && !busy && !this.senderForceOpen && document.activeElement !== this.draft
+        const host = this.tab.element.nativeElement
+        if (host.classList.contains('ai-terminal-sender-collapsed') !== collapsed) {
+            host.classList.toggle('ai-terminal-sender-collapsed', collapsed)
+            if (this.visible) {
+                this.requestTerminalRefit()
+            }
+        }
+    }
+
+    private getEffectiveModeLabel (provider: AIProviderID): string {
+        if (provider !== 'claude') {
+            return ''
+        }
+        const settings = this.providerRunner.getClaudeRunSettings(this.referenceFolder)
+        return CLAUDE_MODE_LABELS[settings.mode] ?? settings.mode
+    }
+
+    /** Adds model / mode / duration and the Open, Copy and Retry buttons once an answer is complete */
+    private decorateAnswerCard (analysis: HTMLElement|null, info: AnswerRunInfo, code: number|null): void {
+        const card = analysis?.closest('.ai-chat-message')
+        if (!analysis || !card) {
+            return
+        }
+        const meta = card.querySelector('.ai-answer-meta')
+        const actions = card.querySelector('.ai-answer-actions')
+        const seconds = ((Date.now() - info.startedAt) / 1000).toFixed(1)
+        const parts = [this.getModelShortLabel(info.provider, info.model), info.mode, `${seconds}s`].filter(Boolean)
+        if (code && code !== 0) {
+            parts.push(`exit ${code}`)
+        }
+        if (meta) {
+            meta.textContent = parts.join(' · ')
+        }
+        if (actions) {
+            const raw = analysis.dataset.raw ?? analysis.textContent ?? ''
+            const open = this.button('Open', 'secondary', () => this.openAnswerViewer(raw, meta?.textContent ?? ''))
+            open.title = 'Read the answer in a large window'
+            const copy = this.button('Copy', 'secondary', () => this.copyText(raw))
+            copy.title = 'Copy the whole answer'
+            const retry = this.button('Retry', 'secondary', () => {
+                if (this.runHandle) {
+                    return
+                }
+                this.retryPayload = { question: info.question, terminalOutput: info.terminalOutput }
+                void this.analyze()
+            })
+            retry.title = 'Ask the same question with the same output again'
+            actions.replaceChildren(open, copy, retry)
+        }
+    }
+
+    private openAnswerViewer (raw: string, metaText: string): void {
+        this.closeAnswerViewer()
+        const overlay = document.createElement('div')
+        overlay.className = 'ai-viewer-overlay'
+        this.guardTerminalEvents(overlay)
+        const viewer = document.createElement('div')
+        viewer.className = 'ai-viewer'
+        viewer.setAttribute('role', 'dialog')
+        viewer.style.setProperty('--ai-terminal-font-size', `${Math.round(this.getFontSize() * 1.15)}px`)
+        const head = document.createElement('div')
+        head.className = 'ai-viewer-head'
+        const title = document.createElement('span')
+        title.className = 'ai-viewer-title'
+        title.textContent = metaText ? `Answer · ${metaText}` : 'Answer'
+        const copy = this.button('Copy', 'secondary', () => this.copyText(raw))
+        const close = this.button('Close', 'secondary', () => this.closeAnswerViewer())
+        close.title = 'Close (Esc)'
+        head.append(title, copy, close)
+        const body = this.renderMarkdown(raw)
+        body.className = 'ai-viewer-body ai-markdown'
+        viewer.append(head, body)
+        overlay.appendChild(viewer)
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) {
+                this.closeAnswerViewer()
+            }
+        })
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                this.closeAnswerViewer()
+            }
+        })
+        overlay.tabIndex = -1
+        this.answerViewer = overlay
+        document.body.appendChild(overlay)
+        requestAnimationFrame(() => overlay.focus())
+    }
+
+    private closeAnswerViewer (): void {
+        this.answerViewer?.remove()
+        this.answerViewer = null
+    }
+
+    /** Grows the question box from one line up to five */
+    private updateQuestionBox (): void {
+        const box = this.question
+        box.style.height = 'auto'
+        const style = getComputedStyle(box)
+        const lineHeight = parseFloat(style.lineHeight) || this.getFontSize() * 1.5
+        const borders = (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0)
+        const padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0) + borders
+        const maxHeight = lineHeight * 5 + padding
+        box.style.height = `${Math.min(Math.max(box.scrollHeight + borders, lineHeight + padding), maxHeight)}px`
+        box.style.overflowY = box.scrollHeight > maxHeight ? 'auto' : 'hidden'
+        this.updateAnalyzeLabel()
+    }
+
+    private getDisplayOutputCount (): number {
+        const pendingLine = this.normalizeOutputLine(this.pendingOutput)
+        const hasPending = pendingLine && !(this.skipNextEmptyInputOutputLine && this.shouldIgnoreEmptyEnterPrompts())
+        return this.recentOutputLines.length + (hasPending ? 1 : 0)
+    }
+
+    private updateAnalyzeLabel (): void {
+        const count = this.getDisplayOutputCount()
+        const verb = this.question.value.trim() ? 'Ask' : 'Analyze'
+        const label = count ? `${verb} (${count} ${count === 1 ? 'line' : 'lines'})` : verb
+        if (this.analyzeButton.textContent !== label) {
+            this.analyzeButton.textContent = label
+        }
+    }
+
+    /** e.g. opus -> opus-5-5 (resolved alias), claude-haiku-4-5-20251001 -> haiku-4-5 */
+    private getModelShortLabel (provider: AIProviderID, model: string): string {
+        if (!model || model === 'auto') {
+            return 'auto model'
+        }
+        let label = model
+        if (provider === 'claude') {
+            const status = this.providerAuth.getClaudeModelStatus(model)
+            if (status?.state === 'ok' && status.resolved) {
+                label = status.resolved
+            }
+            label = label.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+        }
+        return label
+    }
+
+    private setHeaderCollapsed (collapsed: boolean): void {
+        this.config.store.aiTerminal.headerCollapsed = collapsed
+        void this.config.save()
+        this.updateHeaderSummary()
+    }
+
+    private updateHeaderSummary (): void {
+        const collapsed = !!this.config.store.aiTerminal.headerCollapsed && this.signedIn
+        if (this.headerCollapseButton.hidden !== !this.signedIn) {
+            this.headerCollapseButton.hidden = !this.signedIn
+        }
+        if (this.header.classList.contains('is-collapsed') !== collapsed) {
+            this.header.classList.toggle('is-collapsed', collapsed)
+            this.headerCollapseButton.title = collapsed ? 'Show settings' : 'Hide settings'
+            this.headerCollapseButton.setAttribute('aria-expanded', String(!collapsed))
+            this.scheduleDynamicLayoutUpdate()
+        } else if (!this.headerCollapseButton.title) {
+            this.headerCollapseButton.title = collapsed ? 'Show settings' : 'Hide settings'
+        }
+        if (!collapsed) {
+            return
+        }
+        const provider = this.providerAuth.getSelectedProvider()
+        const parts = [provider === 'claude' ? 'Claude Code' : 'Codex', this.getModelShortLabel(provider, this.providerAuth.getSelectedModel())]
+        if (provider === 'claude') {
+            const effort = this.config.store.aiTerminal.claudeEffort || 'auto'
+            parts.push(CLAUDE_MODE_LABELS[this.modeSelect.value] ?? this.modeSelect.value, `effort ${effort}`)
+        }
+        parts.push(this.referenceFolder ? this.formatReferenceFolderPath(this.referenceFolder) : 'no folder')
+        const text = parts.join(' · ')
+        if (this.headerSummaryText.textContent !== text) {
+            this.headerSummaryText.textContent = text
+            this.headerSummaryText.title = `${text}\nClick to show settings`
+        }
+    }
+
+    private labeledRow (pairs: [string, HTMLElement][]): HTMLElement {
+        const row = document.createElement('div')
+        row.className = 'ai-header-row'
+        for (const [label, control] of pairs) {
+            const field = document.createElement('label')
+            field.className = 'ai-header-field'
+            const text = document.createElement('span')
+            text.className = 'ai-header-label'
+            text.textContent = label
+            field.append(text, control)
+            row.appendChild(field)
+        }
+        return row
+    }
+
+    /** Replaces the streamed answer with rendered markdown and lifts "Suggested commands" into action rows */
+    private finalizeAnalysis (analysis: HTMLElement|null): void {
+        if (!analysis?.isConnected || analysis.tagName !== 'PRE') {
+            return
+        }
+        const live = this.liveRenders.get(analysis)
+        if (live) {
+            if (live.timer) {
+                clearTimeout(live.timer)
+            }
+            live.view?.remove()
+            this.liveRenders.delete(analysis)
+        }
+        analysis.hidden = false
+        const text = analysis.textContent ?? ''
+        if (!text.trim() || text === ANALYSIS_PLACEHOLDER) {
+            return
+        }
+        const { commands, rest } = this.extractSuggestedCommands(text)
+        const rendered = this.renderMarkdown(rest)
+        rendered.className = 'ai-analysis ai-chat-analysis ai-markdown'
+        rendered.dataset.raw = text
+        analysis.replaceWith(rendered)
+        if (this.currentAnalysis === analysis) {
+            this.currentAnalysis = rendered
+        }
+        if (commands.length) {
+            rendered.after(this.renderSuggestedCommands(commands))
+        }
+        this.scrollChatToBottom()
+    }
+
+    /** Only the code block under the "Suggested commands" heading is treated as commands */
+    private extractSuggestedCommands (text: string): { commands: string[], rest: string } {
+        const match = /(^|\n)[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?Suggested commands(?:\*\*)?:?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*```[^\n]*\n([\s\S]*?)```/i.exec(text)
+        if (!match) {
+            return { commands: [], rest: text }
+        }
+        const commands = match[2].split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'))
+        return { commands, rest: `${text.slice(0, match.index)}${match[1]}${text.slice(match.index + match[0].length)}`.trimEnd() }
+    }
+
+    private renderSuggestedCommands (commands: string[]): HTMLElement {
+        const box = document.createElement('div')
+        box.className = 'ai-suggested'
+        const head = document.createElement('div')
+        head.className = 'ai-suggested-head'
+        const title = document.createElement('span')
+        title.textContent = 'Suggested commands'
+        const target = document.createElement('span')
+        target.className = 'ai-suggested-target'
+        target.textContent = `→ ${this.getTargetLabel()}`
+        const allButton = this.button('All →', 'secondary', () => this.appendToDraft(commands.join('\n')))
+        allButton.title = 'Put every command into the Sender'
+        head.append(title, target, allButton)
+        box.appendChild(head)
+        for (const command of commands) {
+            const row = document.createElement('div')
+            row.className = 'ai-suggested-row'
+            const code = document.createElement('code')
+            code.textContent = command
+            code.title = command
+            const send = this.button('▶', 'success', () => void this.sendSingleCommand(command))
+            send.title = `Send to ${this.getTargetLabel()} now`
+            const stage = this.button('→', 'secondary', () => this.appendToDraft(command))
+            stage.title = 'Put into the Sender'
+            const copy = this.button('Copy', 'secondary', () => this.copyText(command))
+            copy.title = 'Copy to clipboard'
+            row.append(code, send, stage, copy)
+            box.appendChild(row)
+        }
+        return box
+    }
+
+    /**
+     * Small markdown renderer for answers: headings, paragraphs, nested lists, blockquotes, rules,
+     * tables, fenced code and inline code / bold / italic / links. Text is always set via textContent.
+     */
+    private renderMarkdown (text: string): HTMLElement {
+        const root = document.createElement('div')
+        const lines = text.replace(/\r\n?/g, '\n').split('\n')
+        let paragraph: string[] = []
+        let lists: { indent: number, ordered: boolean, element: HTMLElement }[] = []
+        let quote: HTMLElement|null = null
+        const container = () => quote ?? root
+        const flushParagraph = () => {
+            if (paragraph.length) {
+                const p = document.createElement('p')
+                paragraph.forEach((line, index) => {
+                    if (index) {
+                        p.appendChild(document.createElement('br'))
+                    }
+                    this.renderInline(p, line)
+                })
+                container().appendChild(p)
+                paragraph = []
+            }
+        }
+        const closeLists = () => {
+            lists = []
+        }
+        for (let index = 0; index < lines.length; index++) {
+            let line = lines[index]
+            const quoted = /^\s*>\s?(.*)$/.exec(line)
+            if (quoted) {
+                if (!quote) {
+                    flushParagraph()
+                    closeLists()
+                    quote = document.createElement('blockquote')
+                    root.appendChild(quote)
+                }
+                line = quoted[1]
+            } else if (quote) {
+                flushParagraph()
+                closeLists()
+                quote = null
+            }
+            if (/^\s*```/.test(line)) {
+                flushParagraph()
+                closeLists()
+                const body: string[] = []
+                index++
+                while (index < lines.length && !/^\s*```/.test(lines[index])) {
+                    body.push(lines[index])
+                    index++
+                }
+                const pre = document.createElement('pre')
+                pre.className = 'ai-md-code'
+                pre.textContent = body.join('\n')
+                container().appendChild(pre)
+                continue
+            }
+            if (/^\s*\|.*\|\s*$/.test(line)) {
+                flushParagraph()
+                closeLists()
+                const table = document.createElement('table')
+                table.className = 'ai-md-table'
+                let header = true
+                while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+                    const cells = lines[index].trim().slice(1, -1).split('|').map(cell => cell.trim())
+                    if (cells.every(cell => /^:?-{2,}:?$/.test(cell))) {
+                        index++
+                        continue
+                    }
+                    const tr = document.createElement('tr')
+                    for (const cell of cells) {
+                        const td = document.createElement(header ? 'th' : 'td')
+                        this.renderInline(td, cell)
+                        tr.appendChild(td)
+                    }
+                    table.appendChild(tr)
+                    header = false
+                    index++
+                }
+                index--
+                const wrap = document.createElement('div')
+                wrap.className = 'ai-md-table-wrap'
+                wrap.appendChild(table)
+                container().appendChild(wrap)
+                continue
+            }
+            if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+                flushParagraph()
+                closeLists()
+                container().appendChild(document.createElement('hr'))
+                continue
+            }
+            const heading = /^\s*(#{1,6})\s+(.*)$/.exec(line)
+            if (heading) {
+                flushParagraph()
+                closeLists()
+                const h = document.createElement('div')
+                h.className = `ai-md-heading ai-md-h${heading[1].length}`
+                this.renderInline(h, heading[2].replace(/\s+#+\s*$/, ''))
+                container().appendChild(h)
+                continue
+            }
+            const item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
+            if (item) {
+                flushParagraph()
+                const indent = item[1].replace(/\t/g, '    ').length
+                const ordered = /\d/.test(item[2])
+                while (lists.length && indent < lists[lists.length - 1].indent) {
+                    lists.pop()
+                }
+                let top = lists[lists.length - 1] as typeof lists[number]|undefined
+                if (!top || indent > top.indent || top.ordered !== ordered) {
+                    if (top && indent === top.indent) {
+                        lists.pop()
+                    }
+                    const parentList = lists[lists.length - 1] as typeof lists[number]|undefined
+                    const element = document.createElement(ordered ? 'ol' : 'ul')
+                    const host = parentList?.element.lastElementChild ?? container()
+                    host.appendChild(element)
+                    top = { indent, ordered, element }
+                    lists.push(top)
+                }
+                const li = document.createElement('li')
+                this.renderInline(li, item[3])
+                top.element.appendChild(li)
+                continue
+            }
+            if (!line.trim()) {
+                flushParagraph()
+                closeLists()
+                continue
+            }
+            if (lists.length && /^\s{2,}\S/.test(line)) {
+                const lastItem = lists[lists.length - 1].element.lastElementChild as HTMLElement|null
+                if (lastItem) {
+                    lastItem.appendChild(document.createElement('br'))
+                    this.renderInline(lastItem, line.trim())
+                    continue
+                }
+            }
+            closeLists()
+            paragraph.push(line)
+        }
+        flushParagraph()
+        return root
+    }
+
+    private renderInline (parent: HTMLElement, text: string): void {
+        let buffer = ''
+        const flush = () => {
+            if (buffer) {
+                parent.appendChild(document.createTextNode(buffer))
+                buffer = ''
+            }
+        }
+        let index = 0
+        while (index < text.length) {
+            const rest = text.slice(index)
+            const code = /^(`+)([\s\S]+?)\1(?!`)/.exec(rest)
+            if (code) {
+                flush()
+                const element = document.createElement('code')
+                element.textContent = code[2].trim() || code[2]
+                parent.appendChild(element)
+                index += code[0].length
+                continue
+            }
+            const strong = /^(\*\*|__)(?=\S)([\s\S]*?\S)\1/.exec(rest)
+            if (strong) {
+                flush()
+                const element = document.createElement('strong')
+                this.renderInline(element, strong[2])
+                parent.appendChild(element)
+                index += strong[0].length
+                continue
+            }
+            // "_" only starts emphasis at a word boundary, so snake_case names stay literal
+            const em = /^\*(?=\S)([^*]+?\S|\S)\*(?!\*)/.exec(rest) ?? (/(^|[^\w])$/.test(text.slice(0, index)) ? /^_(?=\S)([^_]+?\S|\S)_(?!\w)/.exec(rest) : null)
+            if (em) {
+                flush()
+                const element = document.createElement('em')
+                this.renderInline(element, em[1])
+                parent.appendChild(element)
+                index += em[0].length
+                continue
+            }
+            const link = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(rest)
+            if (link) {
+                flush()
+                const anchor = document.createElement('a')
+                anchor.className = 'ai-md-link'
+                anchor.textContent = link[1]
+                const url = link[2]
+                anchor.title = url
+                anchor.href = '#'
+                anchor.addEventListener('click', event => {
+                    event.preventDefault()
+                    // Only open web links, externally
+                    if (/^https?:\/\//i.test(url)) {
+                        this.platform.openExternal(url)
+                    }
+                })
+                parent.appendChild(anchor)
+                index += link[0].length
+                continue
+            }
+            buffer += text[index]
+            index++
+        }
+        flush()
     }
 
     private createSavedCommandToolbar (): HTMLElement {
         const toolbar = document.createElement('div')
         toolbar.className = 'ai-saved-command-toolbar'
 
-        const removeButton = this.button('－', 'secondary', () => this.removeSelectedSenderCommand())
-        removeButton.classList.add('ai-saved-command-control', 'is-remove')
-        removeButton.title = 'Remove selected saved command'
-
-        const addButton = this.button('＋', 'secondary', () => this.openSenderTagEditor())
+        const addButton = this.button('+ Save', 'secondary', () => this.openSenderTagEditor())
         addButton.classList.add('ai-saved-command-control', 'is-add')
-        addButton.title = 'Save current sender command'
+        addButton.title = 'Save the Sender content as a tag. Use {{name}} for values to fill in when inserting.'
 
-        toolbar.append(this.savedCommandTabs, removeButton, addButton)
+        toolbar.append(this.savedCommandTabs, addButton)
         return toolbar
     }
 
     private insertSavedCommandIntoDraft (command: string, index: number): void {
+        const names = [...new Set([...command.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)].map(match => match[1]))]
+        if (names.length) {
+            this.openVariableDialog(names, values => {
+                const filled = command.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_, name: string) => values[name])
+                this.insertResolvedCommand(filled, index)
+            })
+            return
+        }
+        this.insertResolvedCommand(command, index)
+    }
+
+    /** Asks for the {{name}} values of a saved tag; the last values are remembered */
+    private openVariableDialog (names: string[], done: (values: Record<string, string>) => void): void {
+        this.closeSenderTagEditor()
+        const remembered: Partial<Record<string, string>> = { ...this.config.store.aiTerminal.senderVariables ?? {} }
+        const overlay = document.createElement('div')
+        overlay.className = 'ai-sender-tag-editor-overlay'
+        this.guardTerminalEvents(overlay)
+        const editor = document.createElement('div')
+        editor.className = 'ai-sender-tag-editor'
+        editor.setAttribute('role', 'dialog')
+        const title = document.createElement('div')
+        title.className = 'ai-sender-tag-editor-title'
+        title.textContent = 'Fill in values'
+        editor.appendChild(title)
+        const inputs = names.map(name => {
+            const label = document.createElement('label')
+            label.className = 'ai-sender-tag-editor-label'
+            label.textContent = name
+            const input = document.createElement('input')
+            input.type = 'text'
+            input.className = 'form-control'
+            input.value = remembered[name] ?? ''
+            label.appendChild(input)
+            editor.appendChild(label)
+            return input
+        })
+        const submit = () => {
+            const values: Record<string, string> = {}
+            names.forEach((name, index) => {
+                values[name] = inputs[index].value
+            })
+            this.config.store.aiTerminal.senderVariables = { ...remembered, ...values }
+            void this.config.save()
+            this.closeSenderTagEditor()
+            done(values)
+        }
+        const actions = document.createElement('div')
+        actions.className = 'ai-sender-tag-editor-actions'
+        actions.append(
+            this.button('Cancel', 'secondary', () => this.closeSenderTagEditor()),
+            this.button('Insert', 'primary', submit),
+        )
+        editor.appendChild(actions)
+        overlay.appendChild(editor)
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) {
+                this.closeSenderTagEditor()
+            }
+        })
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                this.closeSenderTagEditor()
+            } else if (event.key === 'Enter') {
+                event.preventDefault()
+                submit()
+            }
+        })
+        this.senderTagEditor = overlay
+        document.body.appendChild(overlay)
+        requestAnimationFrame(() => inputs[0].focus())
+    }
+
+    private insertResolvedCommand (command: string, index: number): void {
         this.selectedSavedCommandIndex = index
         if (this.getSenderCommandInsertMode() === 'append') {
             const current = this.draft.value.trimEnd()
@@ -765,7 +2020,9 @@ export class AITerminalPanel {
             this.draft.value = command
         }
         this.renderSavedCommandTabs()
+        this.senderNotice = ''
         this.draft.focus()
+        this.updateSenderState()
     }
 
     private async saveSenderCommand (name: string, command: string, editIndex: number|null): Promise<void> {
@@ -842,6 +2099,14 @@ export class AITerminalPanel {
         const actions = document.createElement('div')
         actions.className = 'ai-sender-tag-editor-actions'
         const cancelButton = this.button('Cancel', 'secondary', () => this.closeSenderTagEditor())
+        if (editIndex !== null) {
+            const deleteButton = this.button('Delete', 'danger', () => {
+                this.selectedSavedCommandIndex = editIndex
+                void this.removeSelectedSenderCommand().then(() => this.closeSenderTagEditor())
+            })
+            deleteButton.classList.add('ai-tag-delete-button')
+            actions.appendChild(deleteButton)
+        }
         const saveButton = this.button(editIndex === null ? 'Save' : 'Update', 'primary', () => {
             const command = commandInput.value.trim()
             if (!command) {
@@ -931,6 +2196,12 @@ export class AITerminalPanel {
             })
             this.savedCommandTabs.appendChild(tab)
         })
+        if (!savedCommands.length) {
+            const hint = document.createElement('span')
+            hint.className = 'ai-saved-command-hint'
+            hint.textContent = 'No saved tags yet - type a command and press + Save'
+            this.savedCommandTabs.appendChild(hint)
+        }
         this.savedCommandTabs.scrollLeft = previousScrollLeft
     }
 
@@ -952,8 +2223,11 @@ export class AITerminalPanel {
         heading.className = 'ai-sender-heading'
 
         const titleElement = document.createElement('div')
-        titleElement.className = 'ai-panel-title'
+        titleElement.className = 'ai-panel-title ai-sender-title'
         titleElement.textContent = 'Sender'
+        this.senderTargetElement = document.createElement('span')
+        this.senderTargetElement.className = 'ai-sender-target'
+        titleElement.appendChild(this.senderTargetElement)
 
         heading.append(titleElement, this.createSavedCommandToolbar())
         section.append(heading, body)
@@ -1052,8 +2326,10 @@ export class AITerminalPanel {
 
     private scrollChatToBottom (force = false): void {
         if (!force && !this.chatAutoScroll) {
+            this.jumpLatestButton.hidden = false
             return
         }
+        this.jumpLatestButton.hidden = true
         this.chatViewport.scrollTop = this.chatViewport.scrollHeight
         this.chatAutoScroll = true
     }
@@ -1127,17 +2403,24 @@ export class AITerminalPanel {
         this.aiSessionID = null
         this.currentAnalysis = null
         this.chatHistory.replaceChildren()
-        this.draft.value = ''
+        this.latestOutputAuto = true
+        this.jumpLatestButton.hidden = true
         this.renderProviderIdentity()
+        this.render()
     }
 
     private renderReferenceFolder (): void {
         const hasFolder = Boolean(this.referenceFolder)
         this.clearReferenceFolderButton.hidden = !hasFolder
-        this.referenceFolderPathElement.hidden = !hasFolder
+        this.referenceFolderPathElement.hidden = false
+        this.referenceFolderPathElement.classList.toggle('is-empty', !hasFolder)
+        const buttonLabel = hasFolder ? 'Change' : 'Select'
+        if (this.referenceFolderButton.textContent !== buttonLabel) {
+            this.referenceFolderButton.textContent = buttonLabel
+        }
         if (!this.referenceFolder) {
-            this.referenceFolderPathElement.textContent = ''
-            this.referenceFolderPathElement.removeAttribute('title')
+            this.referenceFolderPathElement.textContent = 'not selected'
+            this.referenceFolderPathElement.title = 'Without a folder, every mode runs as Plan (read-only)'
             return
         }
 
@@ -1212,7 +2495,7 @@ export class AITerminalPanel {
         return element
     }
 
-    private button (label: string, variant: 'primary'|'success'|'secondary'|'danger', click: () => void): HTMLButtonElement {
+    private button (label: string, variant: 'primary'|'success'|'secondary'|'danger', click: (event: MouseEvent) => void): HTMLButtonElement {
         const button = document.createElement('button')
         button.type = 'button'
         button.className = `btn btn-sm btn-${variant === 'secondary' ? 'outline-secondary' : variant}`
@@ -1233,6 +2516,7 @@ export class AITerminalPanel {
 
         const label = document.createElement('span')
         label.textContent = 'Thinking...'
+        this.runningLabel = label
 
         indicator.append(spinner, label)
         return indicator

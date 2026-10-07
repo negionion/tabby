@@ -1,8 +1,19 @@
 import { Injectable } from '@angular/core'
 import { execFile, execFileSync, spawn } from 'child_process'
+import * as os from 'os'
 import { Observable, Subject } from 'rxjs'
 import { ConfigService, PlatformService } from 'tabby-core'
 import { AIProviderID, AIProviderStatus, getAIProvider } from '../providers'
+
+export interface ClaudeModelStatus {
+    /** ok: the model answered; unavailable: rejected by Claude Code; error: probe failed for another reason */
+    state: 'ok'|'unavailable'|'error'
+    /** Full model ID the alias resolved to */
+    resolved?: string
+    reason?: string
+}
+
+const DEFAULT_CLAUDE_MODEL_CANDIDATES = ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1']
 
 @Injectable({ providedIn: 'root' })
 export class AIProviderAuthService {
@@ -329,8 +340,92 @@ export class AIProviderAuthService {
         }
     }
 
+    getClaudeModelStatus (model: string): ClaudeModelStatus|undefined {
+        return this.config.store.aiTerminal.claudeModelCache?.results?.[model]
+    }
+
+    clearClaudeModelCache (): void {
+        this.config.store.aiTerminal.claudeModelCache = null
+    }
+
+    /**
+     * Claude Code has no command that lists models, so each candidate is probed with a tiny request.
+     * Results are cached (24 h by default) because the model picker refreshes on every click.
+     */
+    private async fetchClaudeModels (): Promise<string[]> {
+        const store = this.config.store.aiTerminal
+        const candidates: string[] = Array.isArray(store.claudeModelCandidates) && store.claudeModelCandidates.length
+            ? store.claudeModelCandidates
+            : DEFAULT_CLAUDE_MODEL_CANDIDATES
+        const probeList = candidates.filter(model => model !== 'auto')
+        const cache = store.claudeModelCache
+        const maxAge = (Number(store.claudeModelCacheHours) || 24) * 3600 * 1000
+        const fresh = cache?.results && Date.now() - cache.checkedAt < maxAge && probeList.every(model => cache.results[model])
+        if (!fresh) {
+            const entries = await Promise.all(probeList.map(async model => [model, await this.probeClaudeModel(model)] as const))
+            const results: Record<string, ClaudeModelStatus> = Object.fromEntries(entries)
+            // List the full ID an alias resolved to, so new model versions show up without code changes
+            for (const [, result] of entries) {
+                if (result.state === 'ok' && result.resolved && !(result.resolved in results)) {
+                    results[result.resolved] = { state: 'ok', resolved: result.resolved }
+                }
+            }
+            store.claudeModelCache = { checkedAt: Date.now(), results }
+            await this.config.save()
+        }
+        const resolvedModels = Object.values(store.claudeModelCache.results as Record<string, ClaudeModelStatus>)
+            .filter(result => result.state === 'ok' && result.resolved)
+            .map(result => result.resolved!)
+        return [...new Set(['auto', ...candidates, ...resolvedModels])]
+    }
+
+    private probeClaudeModel (model: string): Promise<ClaudeModelStatus> {
+        return new Promise(resolve => {
+            const args = [
+                '-p', '--model', model, '--max-turns', '1', '--output-format', 'json',
+                '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands',
+                '--system-prompt', 'Model availability probe. Reply with exactly OK.',
+                '--tools', '',
+            ]
+            const invocation = this.buildProviderCommandInvocation('claude', args)
+            let output = ''
+            const child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: os.tmpdir() })
+            const timer = setTimeout(() => child.kill(), 90000)
+            child.stdout.on('data', data => { output += data })
+            child.stderr.on('data', data => { output += data })
+            child.on('error', error => { output += String(error) })
+            child.on('close', code => {
+                clearTimeout(timer)
+                let result: any = null
+                for (const line of output.split(/\r?\n/)) {
+                    if (line.trim().startsWith('{')) {
+                        try {
+                            const parsed = JSON.parse(line.trim())
+                            if (parsed.type === 'result') {
+                                result = parsed
+                            }
+                        } catch { }
+                    }
+                }
+                if (code === 0 && result && !result.is_error) {
+                    resolve({ state: 'ok', resolved: result.modelUsage ? Object.keys(result.modelUsage)[0] : undefined })
+                    return
+                }
+                const text = `${typeof result?.result === 'string' ? result.result + '\n' : ''}${output}`
+                const unavailable = /unrecognized_model|not_found_error|permission_error|model[^\n]{0,60}(not found|not available|not supported|does not exist|invalid)|(not available|no access|not allowed)[^\n]{0,60}model/i.test(text)
+                resolve({ state: unavailable ? 'unavailable' : 'error', reason: text.trim().split(/\r?\n/)[0].slice(0, 200) })
+            })
+            child.stdin.end('Reply with exactly: OK')
+        })
+    }
+
     private async fetchAvailableModels (providerID: AIProviderID): Promise<string[]> {
         const provider = getAIProvider(providerID)
+        if (provider.id === 'claude') {
+            return this.fetchClaudeModels()
+        }
+        // Keeps providers added later off the Codex model catalog
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (provider.id !== 'codex') {
             return provider.models
         }

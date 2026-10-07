@@ -27,7 +27,39 @@ export interface AIProviderRunHandlers {
     output: (chunk: string) => void
     error: (chunk: string) => void
     done: (exitCode: number|null) => void
+    /** Asked when Claude Code wants to use a tool that needs approval. Resolve true to allow. */
+    permission?: (request: AIToolPermissionRequest, requestID: string) => Promise<boolean>|boolean
+    permissionCancel?: (requestID: string) => void
 }
+
+export interface AIToolPermissionRequest {
+    tool_name: string
+    display_name?: string
+    description?: string
+    input?: Record<string, any>
+}
+
+export type ClaudeMode = 'plan'|'manual'|'acceptEdits'|'auto'
+
+export interface ClaudeRunSettings {
+    /** Mode selected in the panel */
+    requested: ClaudeMode
+    /** Mode actually used (Plan when no reference folder is selected) */
+    mode: ClaudeMode
+    tools: string
+    /** Non-plan modes answer permission prompts through the stream-json control protocol */
+    interactive: boolean
+    effort: string|null
+}
+
+const CLAUDE_MODE_TOOLS: Record<ClaudeMode, string> = {
+    plan: 'Read,Glob,Grep',
+    manual: 'Read,Glob,Grep,Edit,Write,Bash',
+    acceptEdits: 'Read,Glob,Grep,Edit,Write',
+    auto: 'Read,Glob,Grep,Edit,Write,Bash',
+}
+
+const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 interface ReferenceFolderPaths {
     nativePath: string
@@ -45,6 +77,11 @@ export class AIProviderRunnerService {
         const referenceFolder = this.resolveReferenceFolder(request.referenceFolder)
         const prompt = this.buildPrompt(request, referenceFolder)
         const claudeSessionID = provider.id === 'claude' ? request.sessionID ?? this.createSessionID() : null
+        const claudeSettings = provider.id === 'claude' ? this.getClaudeRunSettings(referenceFolder) : null
+        const claudeInteractive = !!claudeSettings?.interactive
+        if (claudeSettings && claudeSettings.requested !== claudeSettings.mode) {
+            handlers.output(`[No folder selected - running in Plan (read-only) mode. Select a folder to use ${claudeSettings.requested}.]\n\n`)
+        }
         const child = provider.id === 'claude'
             ? this.spawnClaude(request, claudeSessionID!, referenceFolder)
             : this.spawnCodex(request, referenceFolder)
@@ -66,6 +103,9 @@ export class AIProviderRunnerService {
                 const lines = claudeOutputBuffer.split(/\r?\n/)
                 claudeOutputBuffer = lines.pop() ?? ''
                 for (const line of lines) {
+                    if (claudeInteractive && this.handleClaudeControlLine(line, child, handlers)) {
+                        continue
+                    }
                     claudeProducedText = this.handleClaudeOutputLine(line, handlers, claudeProducedText)
                 }
                 return
@@ -106,7 +146,12 @@ export class AIProviderRunnerService {
             handlers.done(code)
         })
 
-        child.stdin.end(prompt)
+        if (claudeInteractive) {
+            // Keep stdin open for control responses; it is closed when the result event arrives
+            child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: prompt }, parent_tool_use_id: null, session_id: '' })}\n`)
+        } else {
+            child.stdin.end(prompt)
+        }
 
         return {
             cancel: () => {
@@ -122,16 +167,23 @@ export class AIProviderRunnerService {
         sessionID: string,
         referenceFolder: ReferenceFolderPaths|null,
     ): ChildProcessWithoutNullStreams {
+        const settings = this.getClaudeRunSettings(referenceFolder)
         const args = [
             '--print',
             '--verbose',
             '--output-format',
             'stream-json',
             '--permission-mode',
-            'plan',
+            settings.mode,
             '--tools',
-            'Read,Glob,Grep',
+            settings.tools,
         ]
+        if (settings.interactive) {
+            args.push('--input-format', 'stream-json', '--permission-prompt-tool', 'stdio')
+        }
+        if (settings.effort) {
+            args.push('--effort', settings.effort)
+        }
         if (request.sessionID) {
             args.push('--resume', sessionID)
         } else {
@@ -144,6 +196,67 @@ export class AIProviderRunnerService {
 
         const invocation = this.providerAuth.buildProviderCommandInvocation('claude', args)
         return spawn(invocation.command, invocation.args, { env: invocation.env, cwd: referenceFolder?.nativePath })
+    }
+
+    /** Mode, tools and effort for the next Claude Code run. Without a reference folder every mode runs as Plan. */
+    getClaudeRunSettings (referenceFolder: string|ReferenceFolderPaths|null): ClaudeRunSettings {
+        const store = this.config.store.aiTerminal
+        const requested: ClaudeMode = store.claudeMode in CLAUDE_MODE_TOOLS ? store.claudeMode : 'plan'
+        const mode = referenceFolder ? requested : 'plan'
+        const effort = CLAUDE_EFFORT_LEVELS.includes(store.claudeEffort) ? store.claudeEffort : null
+        return { requested, mode, tools: CLAUDE_MODE_TOOLS[mode], interactive: mode !== 'plan', effort }
+    }
+
+    /**
+     * Handles stream-json control messages (tool permission prompts) in interactive modes.
+     * Returns true when the line was consumed.
+     */
+    private handleClaudeControlLine (
+        line: string,
+        child: ChildProcessWithoutNullStreams,
+        handlers: AIProviderRunHandlers,
+    ): boolean {
+        if (!line.includes('"control_request"') && !line.includes('"control_cancel_request"') && !line.includes('"type":"result"')) {
+            return false
+        }
+        let event: any = null
+        try {
+            event = JSON.parse(line.trim())
+        } catch {
+            return false
+        }
+        const reply = (response: Record<string, any>) => {
+            try {
+                child.stdin.write(`${JSON.stringify({ type: 'control_response', response })}\n`)
+            } catch { }
+        }
+        if (event.type === 'result') {
+            // The conversation turn is over; closing stdin lets the CLI exit
+            try {
+                child.stdin.end()
+            } catch { }
+            return false
+        }
+        if (event.type === 'control_cancel_request') {
+            handlers.permissionCancel?.(event.request_id)
+            return true
+        }
+        if (event.type !== 'control_request') {
+            return false
+        }
+        const request = event.request ?? {}
+        if (request.subtype !== 'can_use_tool') {
+            reply({ subtype: 'error', request_id: event.request_id, error: `Unsupported control request: ${request.subtype}` })
+            return true
+        }
+        Promise.resolve(handlers.permission ? handlers.permission(request, event.request_id) : false).then(allowed => {
+            reply({
+                subtype: 'success',
+                request_id: event.request_id,
+                response: allowed ? { behavior: 'allow', updatedInput: request.input } : { behavior: 'deny', message: 'The user denied this action.' },
+            })
+        })
+        return true
     }
 
     private handleClaudeOutputLine (

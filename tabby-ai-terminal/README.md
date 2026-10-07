@@ -62,7 +62,53 @@ Use the provider selector in the panel header to switch between Codex and Claude
 
 If a selected CLI is missing, the panel opens an external terminal and runs that provider's official native installer. Claude Code uses Anthropic's [Windows PowerShell installer](https://claude.ai/install.ps1) on Windows and [shell installer](https://claude.ai/install.sh) on macOS and Linux. The plugin also checks the native install location (`~/.local/bin`) because the installer may not add it to Windows PATH. After installation, return to Tabby and refresh, then use the same panel button to sign in. Login, status checks, and logout are handled by `claude auth login`, `claude auth status`, and `claude auth logout`.
 
-Claude Code runs in non-interactive, read-only Plan mode with only its Read, Glob, and Grep tools enabled. Its sessions can be resumed in the same way as Codex sessions from the panel.
+Claude Code sessions can be resumed in the same way as Codex sessions from the panel.
+
+### Claude Code modes
+
+The Mode selector controls the tools and permission mode passed to Claude Code:
+
+| Mode | `--permission-mode` | Tools |
+| --- | --- | --- |
+| Plan (read-only) | `plan` | Read, Glob, Grep |
+| Manual | `manual` | Read, Glob, Grep, Edit, Write, Bash |
+| Edit automatically | `acceptEdits` | Read, Glob, Grep, Edit, Write |
+| Auto | `auto` | Read, Glob, Grep, Edit, Write, Bash |
+
+Without a reference folder every mode runs as Plan. Non-Plan modes run Claude Code with `--input-format stream-json --permission-prompt-tool stdio`; each permission request is shown in the chat as an Allow/Deny card. The Effort selector passes `--effort` (`auto` omits it).
+
+### Claude Code models
+
+The Claude Code CLI has no model-list command, so the model list is built by probing each candidate with a one-turn `claude -p --model <name>` call. Candidates that fail are marked unavailable, and the full model IDs that aliases resolve to are added to the list. Results are cached for `claudeModelCacheHours`; the `Re-check model availability` entry probes again.
+
+## Panel
+
+- **Header**: provider, model, mode, effort, and reference folder rows. The chevron bar collapses the header into a one-line summary.
+- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons.
+- **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
+- **Sender**: commands to send to the current terminal. Send next sends the first line. Send all sends one line at a time, waits for the terminal prompt (`senderPromptPattern`) before the next line, and stops when the prompt does not return within `senderLineTimeoutMs` or when Stop is pressed. Commands matching `dangerousCommandPatterns` ask for confirmation. An empty sender collapses to one line (`senderAutoCollapse`).
+- **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. Right-click a tag to edit or delete it. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.
+- **Resize**: drag the panel's left edge or the sender's top edge. Double-click a handle to restore the default size.
+
+## Settings
+
+Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `claudeMode` | `plan` | Claude Code mode: `plan`, `manual`, `acceptEdits`, or `auto`. |
+| `claudeEffort` | `auto` | Claude Code effort: `auto`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `claudeModelCandidates` | `[]` | Models to probe. Empty uses the built-in candidate list. |
+| `claudeModelCacheHours` | `24` | How long model probe results are cached. |
+| `claudeModelCache` | `null` | Cached model probe results. |
+| `panelWidth` | `360` | Panel width in pixels. |
+| `senderHeight` | `178` | Sender height in pixels. |
+| `headerCollapsed` | `false` | Whether the panel header is collapsed. |
+| `senderAutoCollapse` | `true` | Collapse an empty sender to one line. |
+| `senderPromptPattern` | `''` | Regular expression for the terminal prompt that Send all waits for. Empty uses `[#$>]\s*$`. |
+| `senderLineTimeoutMs` | `20000` | How long Send all waits for the prompt before it stops. |
+| `dangerousCommandPatterns` | `null` | Regular expressions for commands that need confirmation. `null` uses the built-in list. |
+| `senderVariables` | `{}` | Last values entered for `{{name}}` tag placeholders. |
 
 ## Project Structure
 
