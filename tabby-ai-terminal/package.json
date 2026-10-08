@@ -12,7 +12,8 @@
     "build": "node ../node_modules/webpack/bin/webpack.js --config webpack.config.mjs",
     "prepack": "yarn run build:typings && yarn run build",
     "pack:plugin": "yarn run build:typings && yarn run build && node scripts/pack-plugin.mjs",
-    "watch": "node ../node_modules/webpack/bin/webpack.js --config webpack.config.mjs --watch"
+    "watch": "node ../node_modules/webpack/bin/webpack.js --config webpack.config.mjs --watch",
+    "test": "node test/run.js"
   },
   "files": [
     "dist/index.js",
@@ -27,5 +28,8 @@
     "tabby-core": "*",
     "tabby-settings": "*",
     "tabby-terminal": "*"
+  },
+  "devDependencies": {
+    "jsdom": "24.1.3"
   }
 }

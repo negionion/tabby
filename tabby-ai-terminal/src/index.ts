@@ -30,4 +30,4 @@ import { AITerminalSettingsTabComponent } from './components/aiTerminalSettingsT
         AITerminalSettingsTabComponent,
     ],
 })
-export default class AITerminalModule { }
+export default class AITerminalModule { } // eslint-disable-line @typescript-eslint/no-extraneous-class

@@ -16,8 +16,8 @@ export class AITerminalService {
         private config: ConfigService,
         private notifications: NotificationsService,
         private platform: PlatformService,
-        readonly providerAuth: AIProviderAuthService,
-        readonly providerRunner: AIProviderRunnerService,
+        public readonly providerAuth: AIProviderAuthService,
+        public readonly providerRunner: AIProviderRunnerService,
     ) { }
 
     attachToTerminal (tab: BaseTerminalTabComponent<any>): void {

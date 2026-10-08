@@ -1,0 +1,13 @@
+#!/bin/sh
+case "$(cat $HOME/mode 2>/dev/null)" in
+  utf8)
+    cat > /dev/null
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"\344\270'
+    sleep 0.3
+    printf '\255\346\226\207 answer"}]}}\n'
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}\n'
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"second part"}]}}\n'
+    printf '{"type":"result","result":"ignored"}\n';;
+  early) exit 3;;
+  slow) exec sleep 30;;
+esac

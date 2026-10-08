@@ -1,0 +1,107 @@
+const { JSDOM } = require('jsdom')
+const { loadPanel, installDom } = require('./harness')
+const dom = new JSDOM('<!doctype html><body><div id=tab></div></body>', { pretendToBeVisual: true })
+installDom(dom)
+const { AITerminalPanel } = loadPanel()
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+const ok = (name, cond, extra = '') => console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  | ' + extra : ''}`)
+const sent = [], boxes = []; let clip = null, handlers = null
+const host = document.getElementById('tab')
+const tab = { element: { nativeElement: host }, title: 'Console_ASUS1 - COM10', customTitle: null, sendInput: t => sent.push(t), frontend: { focus () {} }, configure () {} }
+const sub = { subscribe: () => ({ unsubscribe () {} }) }
+const store = { aiTerminal: { maxSessionOutputLines: 1000, ignoreEmptyEnterPrompts: true, savedSenderCommands: [], claudeMode: 'plan' } }
+const config = { store, save: async () => {}, changed$: sub }
+const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto', 'opus'], getClaudeModelStatus: () => undefined, checkSelectedProviderStatus: async () => ({ provider: 'claude', state: 'logged-in', label: 'ok' }), publishStatus () {} }
+const runner = { run (req, h) { handlers = h; return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
+const platform = { showMessageBox: async o => { boxes.push(o); return { response: 0 } }, setClipboard: ({ text }) => { clip = text } }
+const p = new AITerminalPanel(tab, auth, runner, config, platform)
+host.append(p.element, p.senderElement)
+p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
+;(async () => {
+  // header
+  ok('header rows: provider+buttons / Model / Mode+Effort', p.header.querySelectorAll('.ai-header-row').length === 2 && p.headerControls.contains(p.resetSessionButton) && p.modelRow.contains(p.modelSelect) && p.modeRow.contains(p.effortSelect))
+  ok('labels', [...p.header.querySelectorAll('.ai-header-label')].map(x => x.textContent).join(',') === 'Model,Mode,Effort,Folder')
+  ok('rows visible when signed in', p.modelRow.style.display === '' && p.modeRow.style.display === '')
+  ok('identity line', p.signedInIdentity.textContent === 'Session: new', p.signedInIdentity.textContent)
+  ok('New session button, ⋯ menu in the header controls', p.resetSessionButton.textContent === 'New session' && p.headerControls.contains(p.moreButton))
+  ok('effort options plain', [...p.effortSelect.options].map(o => o.textContent).join(',') === 'auto,low,medium,high,xhigh,max')
+  // sender target + collapse
+  ok('target tab named in the send button tooltips', p.senderLineButton.title === 'Send the first line to Console_ASUS1 - COM10' && p.senderAllButton.title.startsWith('Send every line to Console_ASUS1 - COM10') && !p.senderElement.querySelector('.ai-sender-title'), p.senderLineButton.title)
+  ok('empty sender collapsed', host.classList.contains('ai-terminal-sender-collapsed'))
+  ok('tag hint shown when no tags', !!p.savedCommandTabs.querySelector('.ai-saved-command-hint'))
+  // analyze label + draft preserved
+  p.appendOutput('line one\r\nline two\r\n'); p.render()
+  ok('Analyze shows line count', p.analyzeButton.textContent === 'Analyze (2 lines)', p.analyzeButton.textContent)
+  p.draft.value = 'my staged cmd'; p.updateSenderState()
+  ok('non-empty sender expanded', !host.classList.contains('ai-terminal-sender-collapsed'))
+  ok('next preview', p.senderNextPreview.textContent === 'Next: my staged cmd')
+  await p.analyze()
+  const answer = '## Diagnosis\nThe **radio** looks fine. Check `hostapd`:\n- item one\n- item two\n\n| key | value |\n|---|---|\n| ch | 36 |\n\n```\nsome log excerpt\n```\n\n## Suggested commands\n```sh\nwifi status\n# comment line\nreboot\n```\n'
+  for (const part of answer.match(/[\s\S]{1,17}/g)) handlers.output(part)
+  ok('draft NOT overwritten while streaming', p.draft.value === 'my staged cmd')
+  handlers.done(0)
+  const md = p.chatHistory.querySelector('.ai-markdown')
+  ok('markdown rendered', md && md.querySelector('ul li') && md.querySelector('strong').textContent === 'radio' && md.querySelector('code').textContent === 'hostapd' && md.querySelector('table td') && md.querySelector('pre.ai-md-code').textContent === 'some log excerpt')
+  ok('suggested section removed from markdown body', !md.textContent.includes('Suggested commands') && !md.textContent.includes('wifi status'))
+  const rows = [...p.chatHistory.querySelectorAll('.ai-suggested-row')]
+  ok('suggested rows (comment skipped, log block not treated as command)', rows.map(r => r.querySelector('code').textContent).join('|') === 'wifi status|reboot')
+  ok('suggested target shown', p.chatHistory.querySelector('.ai-suggested-target').textContent === '→ Console_ASUS1 - COM10')
+  // inline send
+  rows[0].querySelectorAll('button')[0].click(); await sleep(10)
+  ok('command sent without prompt', sent.at(-1) === 'wifi status\r' && boxes.length === 0)
+  rows[1].querySelectorAll('button')[0].click(); await sleep(10)
+  ok('reboot sent without prompt too', sent.at(-1) === 'reboot\r' && boxes.length === 0)
+  // → and All → follow senderCommandInsertMode (default replace)
+  const allTo = p.chatHistory.querySelector('.ai-suggested-head button')
+  rows[0].querySelectorAll('button')[1].click()
+  ok('-> Sender replaces by default', p.draft.value === 'wifi status')
+  allTo.click()
+  ok('All -> replaces by default', p.draft.value === 'wifi status\nreboot')
+  store.aiTerminal.senderCommandInsertMode = 'append'
+  p.draft.value = 'my staged cmd'
+  rows[0].querySelectorAll('button')[1].click()
+  ok('-> Sender appends in append mode', p.draft.value === 'my staged cmd\nwifi status')
+  rows[0].querySelectorAll('button')[2].click()
+  ok('Copy', clip === 'wifi status')
+  // Send next
+  sent.length = 0; await p.sendDraftLine()
+  ok('Send next sends first line and removes it', sent[0] === 'my staged cmd\r' && p.draft.value === 'wifi status')
+  // Send all sends every line at once
+  p.draft.value = 'cmd1\n\ncmd2\ncmd3'; p.updateSenderState(); sent.length = 0
+  ok('Send all label shows count', p.senderAllButton.textContent === 'Send all (3)')
+  ok('Send all tooltip says at once', p.senderAllButton.title === 'Send every line to Console_ASUS1 - COM10 at once', p.senderAllButton.title)
+  await p.sendDraftAll()
+  ok('all lines sent at once, in order, without waiting for a prompt; draft cleared', sent.join(',') === 'cmd1\r,cmd2\r,cmd3\r' && p.draft.value === '')
+  ok('no Stop button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Stop'))
+  p.draft.value = 'ls\nuci commit wireless\nfirstboot'; sent.length = 0; p.sendDraftAll()
+  ok('Send all sends every command without asking', sent.join(',') === 'ls\r,uci commit wireless\r,firstboot\r' && boxes.length === 0)
+  // tags with variables
+  await p.saveSenderCommand('station dump', 'iw dev {{iface}} station dump', '', null)
+  ok('tag saved, hint gone', p.savedCommandTabs.querySelectorAll('.ai-saved-command-tab').length === 1 && !p.savedCommandTabs.querySelector('.ai-saved-command-hint'))
+  p.draft.value = ''; p.savedCommandTabs.querySelector('.ai-saved-command-tab').click()
+  const dlg = document.querySelector('.ai-sender-tag-editor-overlay')
+  ok('variable dialog opened', dlg && dlg.querySelector('label').textContent.startsWith('iface'))
+  dlg.querySelector('input').value = 'phy0-ap0'; dlg.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  ok('variable filled into draft and remembered', p.draft.value === 'iw dev phy0-ap0 station dump' && store.aiTerminal.senderVariables.iface === 'phy0-ap0')
+  p.openSenderTagEditor(0)
+  const del = [...document.querySelectorAll('.ai-sender-tag-editor button')].find(b => b.textContent === 'Delete')
+  ok('edit dialog has Delete', !!del); del.click(); await sleep(10)
+  ok('tag deleted', store.aiTerminal.savedSenderCommands.length === 0 && !document.querySelector('.ai-sender-tag-editor-overlay'))
+  for (let i = 0; i < 15; i++) await p.saveSenderCommand('', `c${i}`, '', null)
+  ok('15 tags kept (limit is 100)', p.getSavedSenderCommands().length === 15)
+  // no Clear button
+  ok('sender has no Clear button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Clear'))
+  // collapse back
+  p.draft.value = ''; p.draft.blur(); p.updateSenderState()
+  ok('empty + blurred -> collapsed again', host.classList.contains('ai-terminal-sender-collapsed'))
+  store.aiTerminal.senderAutoCollapse = false; p.updateSenderState()
+  ok('senderAutoCollapse=false keeps sender open', !host.classList.contains('ai-terminal-sender-collapsed'))
+  delete store.aiTerminal.senderAutoCollapse; p.updateSenderState()
+  ok('default auto-collapse again', host.classList.contains('ai-terminal-sender-collapsed'))
+  p.draft.focus(); ok('focusing the one-line input expands', !host.classList.contains('ai-terminal-sender-collapsed')); p.draft.blur()
+  // codex hides mode row
+  auth.getSelectedProvider = () => 'codex'; p.providerSelect.value = 'codex'; p.applyProviderStatus({ provider: 'codex', state: 'logged-in', label: 'ok' })
+  ok('codex hides Mode/Effort row', p.modeRow.style.display === 'none' && p.modelRow.style.display === '')
+  p.applyProviderStatus({ provider: 'codex', state: 'logged-out', label: 'x' })
+  ok('logged out hides rows', p.modelRow.style.display === 'none' && p.modeRow.style.display === 'none')
+})().catch(e => { console.error('ERROR', e); process.exit(1) })

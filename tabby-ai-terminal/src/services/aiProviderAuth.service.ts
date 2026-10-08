@@ -1,16 +1,67 @@
 import { Injectable } from '@angular/core'
-import { execFile, execFileSync, spawn } from 'child_process'
+import { ChildProcess, execFile, execFileSync, spawn } from 'child_process'
+import * as os from 'os'
 import { Observable, Subject } from 'rxjs'
 import { ConfigService, PlatformService } from 'tabby-core'
 import { AIProviderID, AIProviderStatus, getAIProvider } from '../providers'
+
+export interface ClaudeModelStatus {
+    /** ok: the model answered; unavailable: rejected by Claude Code; error: probe failed for another reason */
+    state: 'ok'|'unavailable'|'error'
+    /** Full model ID the alias resolved to */
+    resolved?: string
+    reason?: string
+}
+
+export interface CliUpdateStatus {
+    checkedAt: number
+    /** updated: the version changed; current: already up to date; error: the update command failed */
+    state: 'updated'|'current'|'error'
+    version?: string
+    previousVersion?: string
+    message?: string
+}
+
+export interface ProviderCommandInvocation {
+    command: string
+    args: string[]
+    env: typeof process.env
+    cwd?: string
+    windowsVerbatimArguments: boolean
+}
+
+const CLI_UPDATE_TIMEOUT_MS = 5 * 60 * 1000
+
+/** The environment variable, or undefined when it is unset or empty */
+function nonEmptyEnv (name: string): string|undefined {
+    const value = process.env[name]
+    return value ? value : undefined
+}
+/** `codex debug models` is spawned at most this often */
+const CODEX_MODEL_CACHE_MS = 10 * 60 * 1000
+const PROVIDER_COMMAND_TIMEOUT_MS = 60 * 1000
+/** where.exe / `command -v` lookups; a login shell with a slow rc file must not stall the status check */
+const LOOKUP_TIMEOUT_MS = 15 * 1000
+
+const DEFAULT_CLAUDE_MODEL_CANDIDATES = ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1']
 
 @Injectable({ providedIn: 'root' })
 export class AIProviderAuthService {
     private statusChecks = new Map<AIProviderID, Promise<AIProviderStatus>>()
     private statusChanged = new Subject<AIProviderStatus>()
     private modelChecks = new Map<AIProviderID, Promise<string[]>>()
+    private cliUpdates = new Map<AIProviderID, Promise<CliUpdateStatus>>()
+    private cliUpdated = new Subject<AIProviderID>()
+    private activeProviderRuns = 0
+    private codexModelCache: { checkedAt: number, models: string[] }|null = null
+    /** CLI versions read once per provider, shown in the panel header */
+    private cliVersions = new Map<AIProviderID, string|null>()
+    /** Absolute CLI paths found by the login-shell lookup on Linux, where spawn does not read the shell rc files */
+    private resolvedExecutables = new Map<string, string>()
 
     get statusChanged$ (): Observable<AIProviderStatus> { return this.statusChanged }
+    /** Emits when a CLI update of the provider starts or finishes */
+    get cliUpdated$ (): Observable<AIProviderID> { return this.cliUpdated }
 
     constructor (
         private config: ConfigService,
@@ -79,6 +130,10 @@ export class AIProviderAuthService {
         const check = this.checkProviderStatusNow(providerID)
             .then(status => {
                 this.publishStatus(status)
+                if (status.state === 'logged-in' || status.state === 'logged-out') {
+                    this.maybeAutoUpdateProviderCli(providerID)
+                    void this.loadCliVersion(providerID)
+                }
                 return status
             })
             .finally(() => {
@@ -86,6 +141,117 @@ export class AIProviderAuthService {
             })
         this.statusChecks.set(providerID, check)
         return check
+    }
+
+    /** Counts running CLI processes; automatic updates only start while none are running */
+    beginProviderRun (): void {
+        this.activeProviderRuns++
+    }
+
+    endProviderRun (): void {
+        this.activeProviderRuns = Math.max(0, this.activeProviderRuns - 1)
+    }
+
+    isCliUpdating (providerID: AIProviderID): boolean {
+        return this.cliUpdates.has(providerID)
+    }
+
+    /** Resolves once a running update of the provider CLI has finished */
+    async waitForCliUpdate (providerID: AIProviderID): Promise<void> {
+        await this.cliUpdates.get(providerID)
+    }
+
+    /** The version from the last update check, or the one read when the provider was first checked */
+    getKnownCliVersion (providerID: AIProviderID): string|undefined {
+        return this.cliVersions.get(providerID) ?? this.getCliUpdateStatus(providerID)?.version
+    }
+
+    private async loadCliVersion (providerID: AIProviderID): Promise<void> {
+        if (this.cliVersions.has(providerID)) {
+            return
+        }
+        this.cliVersions.set(providerID, null)
+        this.cliVersions.set(providerID, await this.getProviderCliVersion(providerID))
+        this.cliUpdated.next(providerID)
+    }
+
+    getCliUpdateStatus (providerID: AIProviderID): CliUpdateStatus|undefined {
+        return this.config.store.aiTerminal.cliUpdateStatus?.[providerID]
+    }
+
+    async getProviderCliVersion (providerID: AIProviderID): Promise<string|null> {
+        try {
+            const output = await this.execProviderCommand(getAIProvider(providerID).command, ['--version'], 30000)
+            return /\d+\.\d+\.\d+(?:[-+][\w.]+)?/.exec(output)?.[0] ?? null
+        } catch {
+            return null
+        }
+    }
+
+    /** Runs `claude update` / `codex update` and records the result */
+    updateProviderCli (providerID: AIProviderID): Promise<CliUpdateStatus> {
+        const activeUpdate = this.cliUpdates.get(providerID)
+        if (activeUpdate) {
+            return activeUpdate
+        }
+        const update = this.updateProviderCliNow(providerID)
+            .then(status => {
+                if (status.version) {
+                    this.cliVersions.set(providerID, status.version)
+                }
+                this.config.store.aiTerminal.cliUpdateStatus = {
+                    ...this.config.store.aiTerminal.cliUpdateStatus ?? {},
+                    [providerID]: status,
+                }
+                void this.config.save()
+                return status
+            })
+            .finally(() => {
+                this.cliUpdates.delete(providerID)
+                this.cliUpdated.next(providerID)
+            })
+        this.cliUpdates.set(providerID, update)
+        this.cliUpdated.next(providerID)
+        return update
+    }
+
+    /** Updates the CLI at most once per cliUpdateIntervalHours, and only while no CLI process is running */
+    maybeAutoUpdateProviderCli (providerID: AIProviderID): void {
+        const store = this.config.store.aiTerminal
+        if (store.cliAutoUpdate === false || this.activeProviderRuns > 0 || this.cliUpdates.has(providerID)) {
+            return
+        }
+        const intervalHours = Number(store.cliUpdateIntervalHours) || 24
+        const lastCheck = this.getCliUpdateStatus(providerID)?.checkedAt ?? 0
+        if (Date.now() - lastCheck < intervalHours * 3600 * 1000) {
+            return
+        }
+        void this.updateProviderCli(providerID)
+    }
+
+    private async updateProviderCliNow (providerID: AIProviderID): Promise<CliUpdateStatus> {
+        const provider = getAIProvider(providerID)
+        const previousVersion = await this.getProviderCliVersion(providerID) ?? undefined
+        try {
+            const output = await this.execProviderCommand(provider.command, ['update'], CLI_UPDATE_TIMEOUT_MS)
+            const version = await this.getProviderCliVersion(providerID) ?? undefined
+            const lines = output.trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+            return {
+                checkedAt: Date.now(),
+                state: version && previousVersion && version !== previousVersion ? 'updated' : 'current',
+                version,
+                previousVersion,
+                message: lines[lines.length - 1]?.slice(0, 200),
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return {
+                checkedAt: Date.now(),
+                state: 'error',
+                version: previousVersion,
+                message: message.trim().split(/\r?\n/)[0].slice(0, 200),
+            }
+        }
     }
 
     publishStatus (status: AIProviderStatus): void {
@@ -187,7 +353,6 @@ export class AIProviderAuthService {
                     state: 'logged-in',
                     label: `${provider.label} is signed in`,
                     detail: output.trim(),
-                    account: this.extractAccountLabel(output),
                 }
             }
             return {
@@ -223,13 +388,52 @@ export class AIProviderAuthService {
         }
     }
 
-    private execProviderCommand (command: string, args: string[]): Promise<string> {
+    /** The command gets no stdin and is killed after the timeout, so a prompt or a stuck CLI cannot block a status check forever */
+    private execProviderCommand (command: string, args: string[], timeout = PROVIDER_COMMAND_TIMEOUT_MS): Promise<string> {
         return new Promise((resolve, reject) => {
             const invocation = this.buildProviderCommandInvocation(command, args)
-            execFile(invocation.command, invocation.args, { env: invocation.env }, (error, stdout, stderr) => {
+            let stopTimer = (): void => undefined
+            const child = execFile(invocation.command, invocation.args, {
+                env: invocation.env,
+                windowsHide: true,
+                windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+                maxBuffer: 4 * 1024 * 1024,
+            }, (error, stdout, stderr) => {
+                stopTimer()
                 this.resolveCommandResult(error, stdout, stderr, resolve, reject)
             })
+            // execFile's own timeout would only kill cmd.exe on Windows, and its callback waits for the CLI to exit
+            stopTimer = this.startKillTimer(child, timeout, () => {
+                reject(new Error(`${command} ${args.join(' ')} timed out after ${Math.round(timeout / 1000)}s`))
+            })
+            child.stdin?.on('error', () => undefined)
+            child.stdin?.end()
         })
+    }
+
+    /** Kills the process tree after `ms`; the returned function cancels the timer */
+    private startKillTimer (child: ChildProcess, ms: number, onTimeout: () => void): () => void {
+        const timer = setTimeout(() => {
+            this.killProcessTree(child)
+            onTimeout()
+        }, ms)
+        return () => clearTimeout(timer)
+    }
+
+    /** On Windows the CLI runs under cmd.exe, and killing cmd.exe alone leaves the CLI running */
+    killProcessTree (child: ChildProcess): void {
+        if (child.exitCode !== null || child.signalCode !== null) {
+            return
+        }
+        if (process.platform === 'win32' && child.pid) {
+            execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 10000 }, error => {
+                if (error) {
+                    child.kill()
+                }
+            })
+            return
+        }
+        child.kill()
     }
 
     private isProviderCommandAvailableAfterEnvironmentRefresh (command: string): Promise<boolean> {
@@ -238,7 +442,7 @@ export class AIProviderAuthService {
         }
 
         return new Promise(resolve => {
-            execFile('where.exe', [command], { env: this.getWindowsRegistryCommandEnv() }, (error, stdout) => {
+            execFile('where.exe', [command], { env: this.getWindowsRegistryCommandEnv(), timeout: LOOKUP_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
                 resolve(!error && Boolean(this.findUsableProviderExecutable(command, stdout)))
             })
         })
@@ -247,7 +451,7 @@ export class AIProviderAuthService {
     private isProviderCommandAvailable (command: string): Promise<boolean> {
         return new Promise(resolve => {
             if (process.platform === 'win32') {
-                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv() }, (error, stdout) => {
+                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv(), timeout: LOOKUP_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
                     resolve(!error && Boolean(this.findUsableProviderExecutable(command, stdout)))
                 })
                 return
@@ -255,8 +459,9 @@ export class AIProviderAuthService {
 
             execFile(this.getUserLoginShell(), ['-lic', `command -v ${this.commandLine([command])}`], {
                 env: this.getAugmentedCommandEnv(),
+                timeout: LOOKUP_TIMEOUT_MS,
             }, (error, stdout) => {
-                resolve(!error && Boolean(this.findUsableProviderExecutable(command, stdout)))
+                resolve(!error && Boolean(this.rememberExecutable(command, this.findUsableProviderExecutable(command, stdout))))
             })
         })
     }
@@ -264,7 +469,7 @@ export class AIProviderAuthService {
     private async resolveProviderExecutable (command: string): Promise<string|null> {
         return new Promise(resolve => {
             if (process.platform === 'win32') {
-                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv() }, (error, stdout) => {
+                execFile('where.exe', [command], { env: this.getAugmentedCommandEnv(), timeout: LOOKUP_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
                     if (error) {
                         resolve(null)
                         return
@@ -276,14 +481,22 @@ export class AIProviderAuthService {
 
             execFile(this.getUserLoginShell(), ['-lic', `command -v ${this.commandLine([command])}`], {
                 env: this.getAugmentedCommandEnv(),
+                timeout: LOOKUP_TIMEOUT_MS,
             }, (error, stdout) => {
                 if (error) {
                     resolve(null)
                     return
                 }
-                resolve(this.findUsableProviderExecutable(command, stdout))
+                resolve(this.rememberExecutable(command, this.findUsableProviderExecutable(command, stdout)))
             })
         })
+    }
+
+    private rememberExecutable (command: string, executable: string|null): string|null {
+        if (executable?.startsWith('/')) {
+            this.resolvedExecutables.set(command, executable)
+        }
+        return executable
     }
 
     private findUsableProviderExecutable (command: string, output: string): string|null {
@@ -305,12 +518,22 @@ export class AIProviderAuthService {
         return !normalized.includes('/.vscode/extensions/openai.chatgpt-')
     }
 
-    buildProviderCommandInvocation (command: string, args: string[]): { command: string, args: string[], env: NodeJS.ProcessEnv } {
+    /**
+     * On Windows the command line for cmd.exe is built the way Node does for `shell: true`: wrapped in quotes
+     * and passed verbatim, so libuv does not escape the argument quotes a second time. cmd.exe cannot start in
+     * a UNC folder (\\server\share, \\wsl.localhost\...), so such a folder is entered with pushd.
+     */
+    buildProviderCommandInvocation (command: string, args: string[], cwd?: string): ProviderCommandInvocation {
         if (process.platform === 'win32') {
+            const uncFolder = cwd?.startsWith('\\\\') ? cwd : undefined
+            const commandLine = this.commandLine([command, ...args])
+            const line = this.withWindowsUTF8CodePage(uncFolder ? `pushd ${this.commandLine([uncFolder])} && ${commandLine}` : commandLine)
             return {
                 command: 'cmd.exe',
-                args: ['/d', '/s', '/c', this.withWindowsUTF8CodePage(this.commandLine([command, ...args]))],
+                args: ['/d', '/s', '/c', `"${line}"`],
                 env: this.getAugmentedCommandEnv(),
+                cwd: uncFolder ? undefined : cwd,
+                windowsVerbatimArguments: true,
             }
         }
 
@@ -319,26 +542,145 @@ export class AIProviderAuthService {
                 command: this.getUserLoginShell(),
                 args: ['-lic', this.commandLine([command, ...args])],
                 env: this.getAugmentedCommandEnv(),
+                cwd,
+                windowsVerbatimArguments: false,
             }
         }
 
-        return {
-            command,
-            args,
-            env: this.getAugmentedCommandEnv(),
+        // The login-shell lookup may find the CLI through rc-file PATH entries (nvm, fnm); its folder also
+        // holds the node binary that an npm-installed CLI needs
+        const executable = this.resolvedExecutables.get(command)
+        const env = this.getAugmentedCommandEnv()
+        if (executable) {
+            env.PATH = `${executable.slice(0, executable.lastIndexOf('/'))}:${env.PATH ?? ''}`
         }
+        return {
+            command: executable ?? command,
+            args,
+            env,
+            cwd,
+            windowsVerbatimArguments: false,
+        }
+    }
+
+    getClaudeModelStatus (model: string): ClaudeModelStatus|undefined {
+        return this.config.store.aiTerminal.claudeModelCache?.results?.[model]
+    }
+
+    clearClaudeModelCache (): void {
+        this.config.store.aiTerminal.claudeModelCache = null
+    }
+
+    /**
+     * Claude Code has no command that lists models, so each candidate is probed with a tiny request.
+     * Results are cached (24 h by default) because the model picker refreshes on every click.
+     */
+    private async fetchClaudeModels (): Promise<string[]> {
+        const store = this.config.store.aiTerminal
+        const candidates: string[] = Array.isArray(store.claudeModelCandidates) && store.claudeModelCandidates.length
+            ? store.claudeModelCandidates
+            : DEFAULT_CLAUDE_MODEL_CANDIDATES
+        const probeList = candidates.filter(model => model !== 'auto')
+        const cache = store.claudeModelCache
+        const maxAge = (Number(store.claudeModelCacheHours) || 24) * 3600 * 1000
+        const fresh = cache?.results && Date.now() - cache.checkedAt < maxAge && probeList.every(model => cache.results[model])
+        if (!fresh) {
+            await this.waitForCliUpdate('claude')
+            const entries = await Promise.all(probeList.map(async model => [model, await this.probeClaudeModel(model)] as const))
+            const results: Record<string, ClaudeModelStatus> = Object.fromEntries(entries)
+            // List the full ID an alias resolved to, so new model versions show up without code changes
+            for (const [, result] of entries) {
+                if (result.state === 'ok' && result.resolved && !(result.resolved in results)) {
+                    results[result.resolved] = { state: 'ok', resolved: result.resolved }
+                }
+            }
+            store.claudeModelCache = { checkedAt: Date.now(), results }
+            await this.config.save()
+        }
+        const resolvedModels = Object.values(store.claudeModelCache.results as Record<string, ClaudeModelStatus>)
+            .filter(result => result.state === 'ok' && result.resolved)
+            .map(result => result.resolved!)
+        return [...new Set(['auto', ...candidates, ...resolvedModels])]
+    }
+
+    private probeClaudeModel (model: string): Promise<ClaudeModelStatus> {
+        return new Promise(resolve => {
+            const args = [
+                '-p', '--model', model, '--max-turns', '1', '--output-format', 'json',
+                '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands',
+                '--system-prompt', 'Model availability probe. Reply with exactly OK.',
+                '--tools', '',
+            ]
+            const invocation = this.buildProviderCommandInvocation('claude', args, os.tmpdir())
+            let output = ''
+            const child = spawn(invocation.command, invocation.args, {
+                env: invocation.env,
+                cwd: invocation.cwd,
+                windowsHide: true,
+                windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+            })
+            this.beginProviderRun()
+            child.once('close', () => this.endProviderRun())
+            let settled = false
+            let stopTimer = (): void => undefined
+            const finish = (status: ClaudeModelStatus) => {
+                if (!settled) {
+                    settled = true
+                    stopTimer()
+                    resolve(status)
+                }
+            }
+            stopTimer = this.startKillTimer(child, 90000, () => finish({ state: 'error', reason: 'The probe timed out after 90 s' }))
+            child.stdout.setEncoding('utf8')
+            child.stderr.setEncoding('utf8')
+            child.stdout.on('data', data => { output += data })
+            child.stderr.on('data', data => { output += data })
+            child.stdin.on('error', () => undefined)
+            child.on('error', error => { output += String(error) })
+            child.on('close', code => {
+                let result: any = null
+                for (const line of output.split(/\r?\n/)) {
+                    if (line.trim().startsWith('{')) {
+                        try {
+                            const parsed = JSON.parse(line.trim())
+                            if (parsed.type === 'result') {
+                                result = parsed
+                            }
+                        } catch { }
+                    }
+                }
+                if (code === 0 && result && !result.is_error) {
+                    finish({ state: 'ok', resolved: result.modelUsage ? Object.keys(result.modelUsage)[0] : undefined })
+                    return
+                }
+                const text = `${typeof result?.result === 'string' ? result.result + '\n' : ''}${output}`
+                const unavailable = /unrecognized_model|not_found_error|permission_error|model[^\n]{0,60}(not found|not available|not supported|does not exist|invalid)|(not available|no access|not allowed)[^\n]{0,60}model/i.test(text)
+                finish({ state: unavailable ? 'unavailable' : 'error', reason: text.trim().split(/\r?\n/)[0].slice(0, 200) })
+            })
+            child.stdin.end('Reply with exactly: OK')
+        })
     }
 
     private async fetchAvailableModels (providerID: AIProviderID): Promise<string[]> {
         const provider = getAIProvider(providerID)
+        if (provider.id === 'claude') {
+            return this.fetchClaudeModels()
+        }
+        // Keeps providers added later off the Codex model catalog
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (provider.id !== 'codex') {
             return provider.models
         }
 
+        if (this.codexModelCache && Date.now() - this.codexModelCache.checkedAt < CODEX_MODEL_CACHE_MS) {
+            return this.codexModelCache.models
+        }
         try {
             const output = await this.execProviderCommand(provider.command, ['debug', 'models'])
             const catalog = this.extractCodexModelCatalog(output)
-            return this.mergeModelOptions(provider.models, catalog)
+            const models = this.mergeModelOptions(provider.models, catalog)
+            this.codexModelCache = { checkedAt: Date.now(), models }
+            return models
         } catch {
             return provider.models
         }
@@ -377,16 +719,6 @@ export class AIProviderAuthService {
             reject(new Error(output || error.message))
         } else {
             resolve(output)
-        }
-    }
-
-    private extractAccountLabel (output: string): string {
-        try {
-            const data = JSON.parse(output)
-            return data.email ?? data.account ?? data.subscriptionType ?? data.authMethod ?? 'Signed in'
-        } catch {
-            const line = output.split(/\r?\n/).find(item => /logged in|signed in/i.test(item))?.trim()
-            return line || 'Signed in'
         }
     }
 
@@ -458,7 +790,7 @@ export class AIProviderAuthService {
     }
 
     private getProviderModels (): Partial<Record<AIProviderID, string>> {
-        return { ...(this.config.store.aiTerminal.providerModels ?? {}) }
+        return { ...this.config.store.aiTerminal.providerModels ?? {} }
     }
 
     private withWindowsUTF8CodePage (command: string): string {
@@ -470,7 +802,7 @@ export class AIProviderAuthService {
     }
 
     private getLinuxTerminalCandidates (command: string): { command: string, args: string[] }[] {
-        const shell = process.env.SHELL || '/bin/sh'
+        const shell = nonEmptyEnv('SHELL') ?? '/bin/sh'
         return [
             { command: 'x-terminal-emulator', args: ['-e', shell, '-lc', command] },
             { command: 'gnome-terminal', args: ['--', shell, '-lc', command] },
@@ -485,10 +817,10 @@ export class AIProviderAuthService {
     }
 
     private getUserLoginShell (): string {
-        return process.env.SHELL || '/bin/zsh'
+        return nonEmptyEnv('SHELL') ?? '/bin/zsh'
     }
 
-    private getAugmentedCommandEnv (): NodeJS.ProcessEnv {
+    private getAugmentedCommandEnv (): typeof process.env {
         if (process.platform === 'win32') {
             const pathKey = this.getWindowsPathEnvKey()
             const pathEntries = [
@@ -520,7 +852,7 @@ export class AIProviderAuthService {
         }
     }
 
-    private getWindowsRegistryCommandEnv (): NodeJS.ProcessEnv {
+    private getWindowsRegistryCommandEnv (): typeof process.env {
         const pathKey = this.getWindowsPathEnvKey()
         const pathEntries = [
             this.getClaudeNativeInstallDirectory(),
@@ -543,6 +875,7 @@ export class AIProviderAuthService {
             const output = execFileSync('reg.exe', ['query', key, '/v', 'Path'], {
                 encoding: 'utf8',
                 windowsHide: true,
+                timeout: 5000,
             })
             const line = output.split(/\r?\n/).find(item => /^\s*Path\s+REG_/i.test(item))
             return line?.replace(/^\s*Path\s+REG_\w+\s+/i, '').trim() ?? ''
@@ -583,7 +916,8 @@ export class AIProviderAuthService {
             if (/^[A-Za-z0-9._/:=-]+$/.test(arg)) {
                 return arg
             }
-            return `'${arg.replace(/'/g, "'\\''")}'`
+            // A single quote inside single quotes is written as '\''
+            return `'${arg.replace(/'/g, '\'\\\'\'')}'`
         }).join(' ')
     }
 
