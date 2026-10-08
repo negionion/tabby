@@ -88,9 +88,9 @@ When the panel checks the selected provider, the plugin runs `claude update` or 
 ## Panel
 
 - **Header**: provider, New session and a ⋯ menu (Update CLI, Re-check model availability, Log out), then model, mode, effort and reference folder rows. Click the folder field to choose a folder and ✕ to clear it. The chevron bar collapses the header into a one-line summary.
-- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons. The lightbulb inside the question box lists example questions and the last five questions asked; choosing one only fills the box.
+- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons; → Sender and All → replace the sender content or are added after it, as the Sender insert mode setting says. The lightbulb inside the question box lists example questions and the last five questions asked; choosing one only fills the box.
 - **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
-- **Sender**: commands to send to the current terminal. Send next sends the first line. Send all sends one line at a time, waits for the terminal prompt (`senderPromptPattern`) before the next line, and stops when the prompt does not return within `senderLineTimeoutMs` or when Stop is pressed. Commands matching `dangerousCommandPatterns` ask for confirmation. An empty sender collapses to one line (`senderAutoCollapse`).
+- **Sender**: commands to send to the current terminal. Send next sends the first line; Send all sends every line at once. Commands matching `dangerousCommandPatterns` ask for confirmation first (once for the whole batch). An empty sender collapses to one line (`senderAutoCollapse`).
 - **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. The tags are listed in a menu that opens upwards from the chips at the top of the sender: click a tag to insert it, right-click it to edit it, move it to another group or delete it, and drag it to reorder. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.
 - **Tag groups**: a tag can belong to a group, set in the tag dialog or with Move to group. Without groups there is one Tags chip; with groups there are chips for All, each group and Ungrouped, and each opens the menu of its tags. Each group has a color, shown on its chip and as a bar on its tags; colors are assigned automatically without repeats, or chosen from the palette or Custom... (any color). Right-click a group chip to insert all of its commands into the sender, rename it, change its color, or delete it (its tags become ungrouped). Drag a tag onto a group chip to move it into that group, or drag a group chip to reorder groups.
 - **Resize**: drag the panel's left edge or the sender's top edge. Double-click a handle to restore the default size.
@@ -111,8 +111,6 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `senderHeight` | `178` | Sender height in pixels. |
 | `headerCollapsed` | `false` | Whether the panel header is collapsed. |
 | `senderAutoCollapse` | `true` | Collapse an empty sender to one line. |
-| `senderPromptPattern` | `''` | Regular expression for the terminal prompt that Send all waits for. Empty uses `[#$>]\s*$`. |
-| `senderLineTimeoutMs` | `20000` | How long Send all waits for the prompt before it stops. |
 | `dangerousCommandPatterns` | `null` | Regular expressions for commands that need confirmation. `null` uses the built-in list. |
 | `senderVariables` | `{}` | Last values entered for `{{name}}` tag placeholders. |
 | `senderGroupColors` | `{}` | Chosen group colors: a palette name (`amber`, `blue`, `green`, `purple`, `pink`, `teal`, `red`, `gray`) or `#rrggbb`. |

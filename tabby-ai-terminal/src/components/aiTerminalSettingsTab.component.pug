@@ -50,8 +50,8 @@ h3.mb-3(translate) AI terminal
 
 .form-line
     .header
-        .title(translate) Saved sender command mode
-        .description(translate) Choose how saved sender command tabs insert text into the sender draft.
+        .title(translate) Sender insert mode
+        .description(translate) Whether saved tags and suggested commands replace the sender content or are added after it.
     select.form-control(
         [(ngModel)]='config.store.aiTerminal.senderCommandInsertMode',
         (ngModelChange)='config.save()',

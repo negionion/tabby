@@ -36,7 +36,6 @@ const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 /** How long "CLI is up to date" / "CLI update failed" stays in the header after a check */
 const CLI_NOTICE_MS = 60 * 1000
 let tagGroupListSeq = 0
-const DEFAULT_PROMPT_PATTERN = '[#$>]\\s*$'
 const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
     '\\bmtd\\s+(-\\S+\\s+)*(erase|write|unlock)\\b', '\\bdd\\b.*\\bof=/dev/', '\\brm\\s+-\\w*[rf]', '\\bmkfs',
@@ -134,9 +133,6 @@ export class AITerminalPanel {
     private senderNextPreview: HTMLElement
     private senderLineButton: HTMLButtonElement
     private senderAllButton: HTMLButtonElement
-    private senderStopButton: HTMLButtonElement
-    private senderBusy = false
-    private senderStopRequested = false
     private senderForceOpen = false
     private senderPointerDown = false
     /** True from Analyze until the answer ends, including a wait for a CLI update */
@@ -149,12 +145,6 @@ export class AITerminalPanel {
     private modelOptionsProvider: AIProviderID|null = null
     /** Automatic group colors, computed once per tag render */
     private automaticGroupColors: Map<string, string>|null = null
-    private senderNotice = ''
-    private senderProgress = ''
-    private lineSeqAtSend = 0
-    private promptAtLineSeq = 0
-    private promptPatternSource: string|null = null
-    private promptPattern = /[#$>]\s*$/
     private dangerousPatternSource: string[]|null = null
     private dangerousPatterns: RegExp[] = []
     private outputRenderTimer: ReturnType<typeof setTimeout>|null = null
@@ -445,11 +435,7 @@ export class AITerminalPanel {
             this.savedGroupBar.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
         }, { passive: false })
         this.draft = textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
-        this.draft.addEventListener('input', () => {
-            // A "Stopped" notice is about the previous draft; editing dismisses it
-            this.senderNotice = ''
-            this.updateSenderState()
-        })
+        this.draft.addEventListener('input', () => this.updateSenderState())
         this.draft.addEventListener('focus', () => this.updateSenderState())
         this.draft.addEventListener('blur', event => {
             // Clicking tags, groups or buttons of the sender keeps it open, so they do not move under the pointer
@@ -567,16 +553,11 @@ export class AITerminalPanel {
         this.senderNextPreview.className = 'ai-sender-next'
         this.senderLineButton = button('Send next', 'success', () => this.sendDraftLine())
         this.senderAllButton = button('Send all', 'success', () => this.sendDraftAll())
-        this.senderStopButton = button('Stop', 'danger', () => {
-            this.senderStopRequested = true
-        })
-        this.senderStopButton.hidden = true
         this.senderElement.append(
             this.senderSection(this.draft, [
                 this.senderNextPreview,
                 this.senderLineButton,
                 this.senderAllButton,
-                this.senderStopButton,
             ]),
         )
         this.senderElement.addEventListener('click', event => {
@@ -595,7 +576,6 @@ export class AITerminalPanel {
 
     destroy (): void {
         this.destroyed = true
-        this.senderStopRequested = true
         this.cancelAnalyze()
         this.closeSenderTagEditor()
         this.closeTagMenu()
@@ -624,14 +604,9 @@ export class AITerminalPanel {
     }
 
     appendOutput (data: string): void {
-        if (!this.capture.write(data)) {
-            return
+        if (this.capture.write(data)) {
+            this.scheduleOutputRender()
         }
-        // While "Send all" is waiting, remember when a shell prompt appears after new output lines
-        if (this.senderBusy && this.capture.pending.length < 300 && this.getPromptPattern().test(this.capture.getPendingLine())) {
-            this.promptAtLineSeq = this.capture.lineSeq
-        }
-        this.scheduleOutputRender()
     }
 
     /** Output is only recorded while the panel is hidden; when visible, re-render at most every 100 ms */
@@ -1511,7 +1486,6 @@ export class AITerminalPanel {
     }
 
     private sendToTerminal (line: string): void {
-        this.lineSeqAtSend = this.capture.lineSeq
         this.handleInput(`${line}\r`)
         this.tab.sendInput(`${line}\r`)
     }
@@ -1554,95 +1528,34 @@ export class AITerminalPanel {
         return result.response === 0
     }
 
-    private getPromptPattern (): RegExp {
-        const source = this.config.store.aiTerminal.senderPromptPattern || DEFAULT_PROMPT_PATTERN
-        if (this.promptPatternSource !== source) {
-            this.promptPatternSource = source
-            try {
-                this.promptPattern = new RegExp(source)
-            } catch {
-                this.promptPattern = new RegExp(DEFAULT_PROMPT_PATTERN)
-            }
-        }
-        return this.promptPattern
-    }
-
-    /** Resolves once a shell prompt shows up after at least one new output line, or on stop/timeout */
-    private waitForPrompt (lineSeqAtSend: number): Promise<'prompt'|'stopped'|'timeout'> {
-        const timeout = Number(this.config.store.aiTerminal.senderLineTimeoutMs) || 20000
-        const started = Date.now()
-        return new Promise(resolve => {
-            const check = () => {
-                if (this.senderStopRequested) {
-                    resolve('stopped')
-                } else if (this.promptAtLineSeq > lineSeqAtSend) {
-                    setTimeout(() => resolve('prompt'), 50)
-                } else if (Date.now() - started > timeout) {
-                    resolve('timeout')
-                } else {
-                    setTimeout(check, 100)
-                }
-            }
-            check()
-        })
-    }
-
     private async sendDraftLine (): Promise<void> {
         const [line] = this.getDraftCommandLines()
-        if (!line || this.senderBusy || !await this.confirmDangerousCommands([line])) {
+        if (!line || !await this.confirmDangerousCommands([line])) {
             return
         }
-        this.senderNotice = ''
         this.sendToTerminal(line)
         this.removeFirstDraftLine()
         this.updateSenderState()
     }
 
-    /** Sends the draft line by line, waiting for the shell prompt between lines */
+    /** Sends every line of the draft at once; risky lines are confirmed together first */
     private async sendDraftAll (): Promise<void> {
         const lines = this.getDraftCommandLines()
-        if (!lines.length || this.senderBusy || !await this.confirmDangerousCommands(lines)) {
+        if (!lines.length || !await this.confirmDangerousCommands(lines)) {
             return
         }
-        this.senderBusy = true
-        this.senderStopRequested = false
-        this.senderNotice = ''
-        try {
-            for (let index = 0; index < lines.length; index++) {
-                this.senderProgress = `${index + 1}/${lines.length}`
-                this.updateSenderState()
-                this.sendToTerminal(lines[index])
-                const sentAt = this.lineSeqAtSend
-                this.removeFirstDraftLine()
-                if (index === lines.length - 1) {
-                    break
-                }
-                const result = await this.waitForPrompt(sentAt)
-                if (result !== 'prompt') {
-                    this.senderNotice = result === 'stopped' ? 'Stopped' : 'Stopped: no shell prompt came back'
-                    break
-                }
-            }
-        } finally {
-            this.senderBusy = false
-            this.senderStopRequested = false
-            this.senderProgress = ''
-            this.updateSenderState()
+        for (const line of lines) {
+            this.sendToTerminal(line)
         }
+        this.draft.value = ''
+        this.updateSenderState()
     }
 
     private async sendSingleCommand (command: string): Promise<void> {
-        if (this.senderBusy || !await this.confirmDangerousCommands([command])) {
+        if (!await this.confirmDangerousCommands([command])) {
             return
         }
         this.sendToTerminal(command)
-    }
-
-    private appendToDraft (text: string): void {
-        const current = this.draft.value.trimEnd()
-        this.draft.value = current ? `${current}\n${text}` : text
-        this.senderNotice = ''
-        this.updateSenderState()
     }
 
     private copyText (text: string): void {
@@ -1651,28 +1564,24 @@ export class AITerminalPanel {
 
     private updateSenderState (): void {
         const lines = this.getDraftCommandLines()
-        const busy = this.senderBusy
-        this.draft.readOnly = busy
-        this.senderLineButton.disabled = busy || !lines.length
-        this.senderAllButton.disabled = busy || !lines.length
-        this.senderStopButton.hidden = !busy
-        this.senderAllButton.textContent = busy ? `Sending ${this.senderProgress}` : lines.length > 1 ? `Send all (${lines.length})` : 'Send all'
-        const preview = this.senderNotice || (lines.length ? `Next: ${lines[0]}` : '')
+        this.senderLineButton.disabled = !lines.length
+        this.senderAllButton.disabled = !lines.length
+        this.senderAllButton.textContent = lines.length > 1 ? `Send all (${lines.length})` : 'Send all'
+        const preview = lines.length ? `Next: ${lines[0]}` : ''
         if (this.senderNextPreview.textContent !== preview) {
             this.senderNextPreview.textContent = preview
             this.senderNextPreview.title = preview
         }
-        this.senderNextPreview.classList.toggle('is-notice', !!this.senderNotice)
         // The target tab is named in the send button tooltips (and in the confirmation for risky commands)
         const target = this.getTargetLabel()
         if (this.senderTargetLabel !== target) {
             this.senderTargetLabel = target
             this.senderLineButton.title = `Send the first line to ${target}`
-            this.senderAllButton.title = `Send every line to ${target}, waiting for the prompt between lines`
+            this.senderAllButton.title = `Send every line to ${target} at once`
         }
         // An empty sender shrinks to one input line unless disabled in the config
         const collapsed = this.config.store.aiTerminal.senderAutoCollapse !== false
-            && !lines.length && !this.draft.value && !busy && !this.senderForceOpen && document.activeElement !== this.draft
+            && !lines.length && !this.draft.value && !this.senderForceOpen && document.activeElement !== this.draft
         const host = this.tab.element.nativeElement
         if (host.classList.contains('ai-terminal-sender-collapsed') !== collapsed) {
             host.classList.toggle('ai-terminal-sender-collapsed', collapsed)
@@ -1920,7 +1829,7 @@ export class AITerminalPanel {
         const target = document.createElement('span')
         target.className = 'ai-suggested-target'
         target.textContent = `→ ${this.getTargetLabel()}`
-        const allButton = button('All →', 'secondary', () => this.appendToDraft(commands.join('\n')))
+        const allButton = button('All →', 'secondary', () => this.insertIntoDraft(commands.join('\n')))
         allButton.title = 'Put every command into the Sender'
         head.append(title, target, allButton)
         box.appendChild(head)
@@ -1932,7 +1841,7 @@ export class AITerminalPanel {
             code.title = command
             const send = button('▶', 'success', () => void this.sendSingleCommand(command))
             send.title = `Send to ${this.getTargetLabel()} now`
-            const stage = button('→', 'secondary', () => this.appendToDraft(command))
+            const stage = button('→', 'secondary', () => this.insertIntoDraft(command))
             stage.title = 'Put into the Sender'
             const copy = button('Copy', 'secondary', () => this.copyText(command))
             copy.title = 'Copy to clipboard'
@@ -2015,6 +1924,7 @@ export class AITerminalPanel {
         this.insertIntoDraft(command)
     }
 
+    /** Saved tags and suggested commands go into the draft as senderCommandInsertMode says: replace it or append */
     private insertIntoDraft (text: string): void {
         if (this.getSenderCommandInsertMode() === 'append') {
             const current = this.draft.value.trimEnd()
@@ -2023,7 +1933,6 @@ export class AITerminalPanel {
             this.draft.value = text
         }
         this.renderSavedCommandTabs()
-        this.senderNotice = ''
         this.draft.focus()
         this.updateSenderState()
     }

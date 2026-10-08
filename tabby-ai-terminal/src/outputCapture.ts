@@ -20,8 +20,6 @@ export class TerminalOutputCapture {
     lines: string[] = []
     /** The line still being written (no line break yet) */
     pending = ''
-    /** Counts every completed line, also the ones trimmed away */
-    lineSeq = 0
     private sanitizer = new TerminalOutputSanitizer()
     private pendingCarriageReturn = false
     private currentInputLine = ''
@@ -51,12 +49,10 @@ export class TerminalOutputCapture {
         this.pending = this.afterCarriageReturn(segments.pop() ?? '')
         for (const segment of segments) {
             this.addLine(this.afterCarriageReturn(segment))
-            this.lineSeq++
         }
         if (this.pending.length > MAX_PENDING_OUTPUT_CHARS) {
             // Output without line breaks must not grow without limit
             this.addLine(this.pending.slice(-MAX_OUTPUT_LINE_CHARS))
-            this.lineSeq++
             this.pending = ''
         }
         this.trim()
@@ -139,7 +135,7 @@ export class TerminalOutputCapture {
         return this.lines.join('\n')
     }
 
-    getPendingLine (): string {
+    private getPendingLine (): string {
         return this.normalizeLine(this.pending)
     }
 

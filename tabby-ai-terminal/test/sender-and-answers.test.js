@@ -9,7 +9,7 @@ const sent = [], boxes = []; let decide = 0, clip = null, handlers = null
 const host = document.getElementById('tab')
 const tab = { element: { nativeElement: host }, title: 'Console_ASUS1 - COM10', customTitle: null, sendInput: t => sent.push(t), frontend: { focus () {} }, configure () {} }
 const sub = { subscribe: () => ({ unsubscribe () {} }) }
-const store = { aiTerminal: { maxSessionOutputLines: 1000, ignoreEmptyEnterPrompts: true, savedSenderCommands: [], claudeMode: 'plan', senderLineTimeoutMs: 400 } }
+const store = { aiTerminal: { maxSessionOutputLines: 1000, ignoreEmptyEnterPrompts: true, savedSenderCommands: [], claudeMode: 'plan' } }
 const config = { store, save: async () => {}, changed$: sub }
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto', 'opus'], getClaudeModelStatus: () => undefined, checkSelectedProviderStatus: async () => ({ provider: 'claude', state: 'logged-in', label: 'ok' }), publishStatus () {} }
 const runner = { run (req, h) { handlers = h; return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
@@ -53,33 +53,28 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('dangerous command asks, Cancel blocks it', boxes.length === 1 && sent.at(-1) === 'wifi status\r', boxes[0] && boxes[0].message)
   decide = 0; rows[1].querySelectorAll('button')[0].click(); await sleep(10)
   ok('dangerous command sent after confirm', sent.at(-1) === 'reboot\r')
+  // → and All → follow senderCommandInsertMode (default replace)
+  const allTo = p.chatHistory.querySelector('.ai-suggested-head button')
   rows[0].querySelectorAll('button')[1].click()
-  ok('-> Sender appends', p.draft.value === 'my staged cmd\nwifi status')
+  ok('-> Sender replaces by default', p.draft.value === 'wifi status')
+  allTo.click()
+  ok('All -> replaces by default', p.draft.value === 'wifi status\nreboot')
+  store.aiTerminal.senderCommandInsertMode = 'append'
+  p.draft.value = 'my staged cmd'
+  rows[0].querySelectorAll('button')[1].click()
+  ok('-> Sender appends in append mode', p.draft.value === 'my staged cmd\nwifi status')
   rows[0].querySelectorAll('button')[2].click()
   ok('Copy', clip === 'wifi status')
   // Send next
   sent.length = 0; await p.sendDraftLine()
   ok('Send next sends first line and removes it', sent[0] === 'my staged cmd\r' && p.draft.value === 'wifi status')
-  // Send all with prompt waiting
-  p.draft.value = 'cmd1\ncmd2\ncmd3'; p.updateSenderState(); sent.length = 0
+  // Send all sends every line at once
+  p.draft.value = 'cmd1\n\ncmd2\ncmd3'; p.updateSenderState(); sent.length = 0
   ok('Send all label shows count', p.senderAllButton.textContent === 'Send all (3)')
-  p.appendOutput('root@asus:~# ')
-  const run = p.sendDraftAll(); await sleep(30)
-  ok('first line sent, second waits for prompt', sent.join(',') === 'cmd1\r' && p.draft.readOnly && !p.senderStopButton.hidden, p.senderAllButton.textContent)
-  p.appendOutput('c'); await sleep(250)
-  ok('echo without newline does not release next line', sent.length === 1)
-  p.appendOutput('md1\r\nresult\r\nroot@asus:~# '); await sleep(250)
-  ok('prompt after output releases next line', sent.join(',') === 'cmd1\r,cmd2\r')
-  p.appendOutput('cmd2\r\nroot@asus:~# '); await sleep(250)
-  await run
-  ok('all three sent in order, draft empty, busy cleared', sent.join(',') === 'cmd1\r,cmd2\r,cmd3\r' && p.draft.value === '' && !p.senderBusy && p.senderStopButton.hidden)
-  // timeout keeps the rest
-  p.draft.value = 'a1\na2\na3'; sent.length = 0
+  ok('Send all tooltip says at once', p.senderAllButton.title === 'Send every line to Console_ASUS1 - COM10 at once', p.senderAllButton.title)
   await p.sendDraftAll()
-  ok('no prompt -> stops, remaining lines kept', sent.join(',') === 'a1\r' && p.draft.value === 'a2\na3' && p.senderNextPreview.textContent.startsWith('Stopped'), p.senderNextPreview.textContent)
-  // stop button
-  sent.length = 0; const run2 = p.sendDraftAll(); await sleep(50); p.senderStopButton.click(); await run2
-  ok('Stop works', sent.join(',') === 'a2\r' && p.draft.value === 'a3' && p.senderNextPreview.textContent === 'Stopped')
+  ok('all lines sent at once, in order, without waiting for a prompt; draft cleared', sent.join(',') === 'cmd1\r,cmd2\r,cmd3\r' && p.draft.value === '')
+  ok('no Stop button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Stop'))
   // dangerous in Send all asks once for the batch
   boxes.length = 0; decide = 1; p.draft.value = 'ls\nuci commit wireless\nfirstboot'; sent.length = 0; await p.sendDraftAll()
   ok('batch with dangerous lines asks once, cancel sends nothing', boxes.length === 1 && boxes[0].detail === 'uci commit wireless\nfirstboot' && sent.length === 0)
@@ -97,11 +92,8 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('tag deleted', store.aiTerminal.savedSenderCommands.length === 0 && !document.querySelector('.ai-sender-tag-editor-overlay'))
   for (let i = 0; i < 15; i++) await p.saveSenderCommand('', `c${i}`, '', null)
   ok('more than 10 tags kept', p.getSavedSenderCommands().length === 15)
-  // no Clear button; typing dismisses a notice
+  // no Clear button
   ok('sender has no Clear button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Clear'))
-  p.senderNotice = 'Stopped'; p.updateSenderState()
-  p.draft.value = 'x'; p.draft.dispatchEvent(new window.Event('input', { bubbles: true }))
-  ok('typing in the draft dismisses the notice', p.senderNotice === '' && !p.senderNextPreview.classList.contains('is-notice'))
   // collapse back
   p.draft.value = ''; p.draft.blur(); p.updateSenderState()
   ok('empty + blurred -> collapsed again', host.classList.contains('ai-terminal-sender-collapsed'))

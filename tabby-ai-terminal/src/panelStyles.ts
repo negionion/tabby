@@ -456,10 +456,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.ai-sender-next.is-notice {
-    color: #ffc107;
-    font-family: inherit;
-}
 .ai-saved-group-bar {
     flex: 1 1 auto;
     max-width: 100%;

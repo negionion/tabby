@@ -12,7 +12,7 @@ const sent = []
 const tab = { element: { nativeElement: host }, title: 'COM10', customTitle: null, sendInput: t => sent.push(t), frontend: { focus () {} }, configure () { configures++ } }
 let configures = 0
 const sub = { subscribe: () => ({ unsubscribe () {} }) }
-const store = { aiTerminal: { maxSessionOutputLines: 5, savedSenderCommands: [], ignoreEmptyEnterPrompts: false, senderLineTimeoutMs: 5000 } }
+const store = { aiTerminal: { maxSessionOutputLines: 5, savedSenderCommands: [], ignoreEmptyEnterPrompts: false } }
 const statusChanged = new Subject()
 let updating = false, finish = null, provider = 'claude', modelCalls = 0
 const auth = {
@@ -99,13 +99,10 @@ const lines = () => p.capture.getDisplayLines().join('|')
   const r2 = p.refreshModelOptions(); p.providerSelect.value = 'claude'; provider = 'claude'
   await r2; await sleep(50)
   ok('provider changed during load: list matches the current provider', [...p.modelSelect.options].some(o => o.value === 'sonnet') && ![...p.modelSelect.options].some(o => o.value === 'gpt-5.4'), [...p.modelSelect.options].map(o => o.value).join(','))
-  // destroy stops Send all and refits
-  p.draft.value = 'echo 1\necho 2\necho 3'
-  const sending = p.sendDraftAll(); await sleep(20)
+  // no terminal refit after destroy
   configures = 0
   p.destroy()
-  await sending; await sleep(150)
-  ok('destroy stops Send all', sent.filter(x => x.startsWith('echo')).length === 1, JSON.stringify(sent))
+  p.requestTerminalRefit(); await sleep(150)
   ok('no refit after destroy', configures === 0)
   console.log(failed ? `\n${failed} FAILED` : '\nALL PASSED'); process.exit(failed ? 1 : 0)
 })().catch(e => { console.log('ERROR', e); process.exit(1) })
