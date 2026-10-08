@@ -37,12 +37,6 @@ const EMPTY_OUTPUT_TEXT = 'No terminal output captured yet.'
 /** How long "CLI is up to date" / "CLI update failed" stays in the header after a check */
 const CLI_NOTICE_MS = 60 * 1000
 let tagGroupListSeq = 0
-const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
-    '\\breboot\\b', '\\bpoweroff\\b', '\\bhalt\\b', '\\bfirstboot\\b', '\\bjffs2reset\\b', '\\bsysupgrade\\b',
-    '\\bmtd\\s+(-\\S+\\s+)*(erase|write|unlock)\\b', '\\bdd\\b.*\\bof=/dev/', '\\brm\\s+-\\w*[rf]', '\\bmkfs',
-    '\\buci\\s+(commit|import|batch)\\b', '\\bfw_setenv\\b', '^\\s*wifi(\\s+(up|down|reload))?\\s*$',
-    '/etc/init\\.d/\\S+\\s+(stop|restart|disable)\\b', '\\bkillall\\b', '\\bkill\\s+-9\\b',
-]
 const EXAMPLE_QUESTIONS = ['Why did the STA disconnect?', 'Summarize the errors and warnings in the output.']
 const RECENT_QUESTIONS = 5
 /** Longer questions are shortened in the menu; choosing one still fills in the whole question */
@@ -145,8 +139,6 @@ export class AITerminalPanel {
     private modelOptionsProvider: AIProviderID|null = null
     /** Automatic group colors, computed once per tag render */
     private automaticGroupColors: Map<string, string>|null = null
-    private dangerousPatternSource: string[]|null = null
-    private dangerousPatterns: RegExp[] = []
     private outputRenderTimer: ReturnType<typeof setTimeout>|null = null
     private appliedFontSize = 0
     private appliedPanelWidth = 0
@@ -172,6 +164,8 @@ export class AITerminalPanel {
     private selectedSavedCommandIndex = -1
     private dragTagIndex: number|null = null
     private dragGroup: string|null = null
+    /** The group list was opened by a tag drag, so it closes again when the drag ends */
+    private groupMenuOpenedForDrag = false
     private senderTagEditor: HTMLElement|null = null
     private statusSubscription: Subscription
     private cliUpdateSubscription: Subscription
@@ -423,7 +417,7 @@ export class AITerminalPanel {
         this.chatBody.append(this.chatStack, questionRow)
     }
 
-    /** Sender tag and group bars, the draft and the listeners that keep the sender open or collapse it */
+    /** Saved tag row, group selector, the draft and the listeners that keep the sender open or collapse it */
     private buildSenderInput (): void {
         this.savedCommandTabs = document.createElement('div')
         this.savedCommandTabs.className = 'ai-saved-command-tabs'
@@ -437,7 +431,7 @@ export class AITerminalPanel {
         }, { passive: false })
         this.savedGroupBar = document.createElement('div')
         this.savedGroupBar.className = 'ai-saved-group-bar'
-        this.draft = textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
+        this.draft = textarea('Type commands to stage them here, one per line', 6)
         this.draft.addEventListener('input', () => this.updateSenderState())
         this.draft.addEventListener('focus', () => this.updateSenderState())
         this.draft.addEventListener('blur', event => {
@@ -544,13 +538,12 @@ export class AITerminalPanel {
             ]),
         )
 
-        const chatSection = this.section('AI Chat Panel', this.chatBody, [this.clearLatestButton, this.runningIndicator, this.analyzeButton, this.cancelButton])
+        const chatSection = this.section(null, this.chatBody, [this.clearLatestButton, this.runningIndicator, this.analyzeButton, this.cancelButton])
         chatSection.classList.add('ai-chat-section')
-        chatSection.querySelector(':scope > .ai-panel-title')?.remove()
         this.content.append(chatSection)
     }
 
-    /** Sender actions (Send next / Send all / Stop) and the click that expands a collapsed sender */
+    /** Sender actions (Send next / Send all) and the click that expands a collapsed sender */
     private assembleSender (): void {
         this.senderNextPreview = document.createElement('span')
         this.senderNextPreview.className = 'ai-sender-next'
@@ -1229,7 +1222,6 @@ export class AITerminalPanel {
         this.loginOnly.hidden = signedIn
         this.content.hidden = !signedIn
         this.signedInIdentity.hidden = !signedIn
-        this.providerSelect.hidden = false
         this.modelSelect.hidden = !signedIn
         this.modelRow.style.display = signedIn ? '' : 'none'
         this.modeRow.style.display = signedIn && status.provider === 'claude' ? '' : 'none'
@@ -1497,43 +1489,9 @@ export class AITerminalPanel {
         return this.tab.customTitle || this.tab.title || 'this tab'
     }
 
-    private getDangerousPatterns (): RegExp[] {
-        const configured = this.config.store.aiTerminal.dangerousCommandPatterns
-        const sources: string[] = Array.isArray(configured) ? configured : DEFAULT_DANGEROUS_COMMAND_PATTERNS
-        if (this.dangerousPatternSource !== sources) {
-            this.dangerousPatternSource = sources
-            this.dangerousPatterns = sources.map(source => {
-                try {
-                    return new RegExp(source, 'i')
-                } catch {
-                    return null
-                }
-            }).filter((pattern): pattern is RegExp => !!pattern)
-        }
-        return this.dangerousPatterns
-    }
-
-    /** Asks before sending commands that reboot, erase or reconfigure the device */
-    private async confirmDangerousCommands (lines: string[]): Promise<boolean> {
-        const patterns = this.getDangerousPatterns()
-        const risky = lines.filter(line => patterns.some(pattern => pattern.test(line)))
-        if (!risky.length) {
-            return true
-        }
-        const result = await this.platform.showMessageBox({
-            type: 'warning',
-            message: `Send ${risky.length === 1 ? 'this command' : `these ${risky.length} commands`} to ${this.getTargetLabel()}?`,
-            detail: risky.join('\n'),
-            buttons: ['Send', 'Cancel'],
-            defaultId: 1,
-            cancelId: 1,
-        })
-        return result.response === 0
-    }
-
-    private async sendDraftLine (): Promise<void> {
+    private sendDraftLine (): void {
         const [line] = this.getDraftCommandLines()
-        if (!line || !await this.confirmDangerousCommands([line])) {
+        if (!line) {
             return
         }
         this.sendToTerminal(line)
@@ -1541,10 +1499,10 @@ export class AITerminalPanel {
         this.updateSenderState()
     }
 
-    /** Sends every line of the draft at once; risky lines are confirmed together first */
-    private async sendDraftAll (): Promise<void> {
+    /** Sends every line of the draft at once */
+    private sendDraftAll (): void {
         const lines = this.getDraftCommandLines()
-        if (!lines.length || !await this.confirmDangerousCommands(lines)) {
+        if (!lines.length) {
             return
         }
         for (const line of lines) {
@@ -1552,13 +1510,6 @@ export class AITerminalPanel {
         }
         this.draft.value = ''
         this.updateSenderState()
-    }
-
-    private async sendSingleCommand (command: string): Promise<void> {
-        if (!await this.confirmDangerousCommands([command])) {
-            return
-        }
-        this.sendToTerminal(command)
     }
 
     private copyText (text: string): void {
@@ -1575,7 +1526,7 @@ export class AITerminalPanel {
             this.senderNextPreview.textContent = preview
             this.senderNextPreview.title = preview
         }
-        // The target tab is named in the send button tooltips (and in the confirmation for risky commands)
+        // The target tab is named in the send button tooltips
         const target = this.getTargetLabel()
         if (this.senderTargetLabel !== target) {
             this.senderTargetLabel = target
@@ -1842,7 +1793,7 @@ export class AITerminalPanel {
             const code = document.createElement('code')
             code.textContent = command
             code.title = command
-            const send = button('▶', 'success', () => void this.sendSingleCommand(command))
+            const send = button('▶', 'success', () => this.sendToTerminal(command))
             send.title = `Send to ${this.getTargetLabel()} now`
             const stage = button('→', 'secondary', () => this.insertIntoDraft(command))
             stage.title = 'Put into the Sender'
@@ -2031,8 +1982,7 @@ export class AITerminalPanel {
         const cancelButton = button('Cancel', 'secondary', () => this.closeSenderTagEditor())
         if (editIndex !== null) {
             const deleteButton = button('Delete', 'danger', () => {
-                this.selectedSavedCommandIndex = editIndex
-                void this.removeSelectedSenderCommand().then(() => this.closeSenderTagEditor())
+                void this.deleteSavedCommand(editIndex).then(() => this.closeSenderTagEditor())
             })
             deleteButton.classList.add('ai-tag-delete-button')
             actions.appendChild(deleteButton)
@@ -2058,15 +2008,15 @@ export class AITerminalPanel {
         this.senderTagEditor = null
     }
 
-    private async removeSelectedSenderCommand (): Promise<void> {
+    private async deleteSavedCommand (index: number): Promise<void> {
         const savedCommands = this.getSavedSenderCommands()
-        if (!savedCommands.length) {
-            return
-        }
-
-        const index = this.selectedSavedCommandIndex >= 0 ? this.selectedSavedCommandIndex : savedCommands.length - 1
         savedCommands.splice(index, 1)
-        this.selectedSavedCommandIndex = Math.min(index, savedCommands.length - 1)
+        // The highlight stays on the tag it was on
+        if (this.selectedSavedCommandIndex === index) {
+            this.selectedSavedCommandIndex = -1
+        } else if (this.selectedSavedCommandIndex > index) {
+            this.selectedSavedCommandIndex--
+        }
         await this.setSavedSenderCommands(savedCommands)
     }
 
@@ -2118,7 +2068,7 @@ export class AITerminalPanel {
             item.name,
             item.command,
             item.group ? `Group: ${item.group}` : '',
-            'Right-click to edit, move or duplicate; drag to reorder',
+            'Right-click to edit, move, duplicate or delete; drag to reorder or onto a group',
         ].filter(Boolean).join('\n\n')
         tab.addEventListener('click', () => this.insertSavedCommandIntoDraft(item.command, index))
         tab.addEventListener('contextmenu', event => {
@@ -2159,7 +2109,7 @@ export class AITerminalPanel {
         selector.addEventListener('contextmenu', event => {
             event.preventDefault()
             if (filter) {
-                this.openGroupMenu(filter === UNGROUPED_FILTER ? null : filter, event)
+                this.openGroupActions(filter === UNGROUPED_FILTER ? null : filter, event)
             }
         })
         this.savedGroupBar.appendChild(selector)
@@ -2184,8 +2134,14 @@ export class AITerminalPanel {
             this.closeGroupMenu()
             return
         }
+        this.showGroupMenu()
+    }
+
+    /** Opens the list without rendering the tags again, so a tag being dragged stays in place */
+    private showGroupMenu (): HTMLElement|null {
         this.groupMenu = this.createGroupMenuElement()
-        this.renderSavedCommandTabs()
+        this.renderGroupMenu()
+        return this.groupMenu
     }
 
     private closeGroupMenu (): void {
@@ -2194,6 +2150,7 @@ export class AITerminalPanel {
         }
         this.groupMenu.remove()
         this.groupMenu = null
+        this.groupMenuOpenedForDrag = false
         this.savedGroupBar.querySelector('.ai-group-selector')?.classList.remove('is-active')
     }
 
@@ -2235,7 +2192,7 @@ export class AITerminalPanel {
             element.title = `${group}\n\nRight-click for group actions, drag to reorder`
             element.addEventListener('contextmenu', event => {
                 event.preventDefault()
-                this.openGroupMenu(group, event)
+                this.openGroupActions(group, event)
             })
             this.installGroupDrag(element, group)
         }
@@ -2247,9 +2204,9 @@ export class AITerminalPanel {
         ungrouped.title = 'Tags without a group\n\nDrop a tag here to take it out of its group'
         ungrouped.addEventListener('contextmenu', event => {
             event.preventDefault()
-            this.openGroupMenu(null, event)
+            this.openGroupActions(null, event)
         })
-        this.installGroupChipDrop(ungrouped, null)
+        this.installGroupDrop(ungrouped, null)
         this.groupMenu.replaceChildren(list)
         anchor.classList.add('is-active')
         this.positionGroupMenu(anchor)
@@ -2333,15 +2290,12 @@ export class AITerminalPanel {
             { type: 'separator' },
             {
                 label: 'Delete',
-                click: () => {
-                    this.selectedSavedCommandIndex = index
-                    void this.removeSelectedSenderCommand()
-                },
+                click: () => void this.deleteSavedCommand(index),
             },
         ], event)
     }
 
-    private openGroupMenu (group: string|null, event: MouseEvent): void {
+    private openGroupActions (group: string|null, event: MouseEvent): void {
         const count = this.getSavedSenderCommands().filter(item => group === null ? !item.group : item.group === group).length
         const menu: MenuItemOptions[] = [
             { label: `Insert all into Sender (${count})`, enabled: count > 0, click: () => this.insertGroupIntoDraft(group) },
@@ -2491,7 +2445,7 @@ export class AITerminalPanel {
         await this.setSavedSenderCommands(commands)
     }
 
-    private installTagDrag (tab: HTMLElement, index: number, axis: 'x'|'y' = 'x'): void {
+    private installTagDrag (tab: HTMLElement, index: number): void {
         tab.draggable = true
         tab.addEventListener('dragstart', event => {
             event.stopPropagation()
@@ -2503,6 +2457,17 @@ export class AITerminalPanel {
             }
             tab.classList.add('is-dragging')
             this.groupMenu?.classList.add('is-dragging-tag')
+            // Open the group list so the tag can be dropped on a group; after dragstart, once the drag image is taken
+            if (!this.groupMenu && !this.savedGroupBar.hidden) {
+                setTimeout(() => {
+                    if (this.dragTagIndex === null || this.groupMenu) {
+                        return
+                    }
+                    const menu = this.showGroupMenu()
+                    this.groupMenuOpenedForDrag = !!menu
+                    menu?.classList.add('is-dragging-tag')
+                })
+            }
         })
         tab.addEventListener('dragend', () => this.endSavedDrag())
         tab.addEventListener('dragover', event => {
@@ -2514,7 +2479,7 @@ export class AITerminalPanel {
             if (event.dataTransfer) {
                 event.dataTransfer.dropEffect = 'move'
             }
-            const before = this.isBeforeMidpoint(tab, event, axis)
+            const before = this.isBeforeMidpoint(tab, event, 'x')
             tab.classList.toggle('is-drop-before', before)
             tab.classList.toggle('is-drop-after', !before)
         })
@@ -2526,7 +2491,7 @@ export class AITerminalPanel {
             event.preventDefault()
             event.stopPropagation()
             const from = this.dragTagIndex
-            const before = this.isBeforeMidpoint(tab, event, axis)
+            const before = this.isBeforeMidpoint(tab, event, 'x')
             this.endSavedDrag()
             if (from !== index) {
                 void this.moveTag(from, index, before)
@@ -2547,11 +2512,11 @@ export class AITerminalPanel {
             element.classList.add('is-dragging')
         })
         element.addEventListener('dragend', () => this.endSavedDrag())
-        this.installGroupChipDrop(element, group)
+        this.installGroupDrop(element, group)
     }
 
-    /** A group chip accepts a dragged tag (moves it into the group) or a dragged group (reorders groups) */
-    private installGroupChipDrop (element: HTMLElement, group: string|null): void {
+    /** A group in the list accepts a dragged tag (moves it into the group) or a dragged group (reorders groups) */
+    private installGroupDrop (element: HTMLElement, group: string|null): void {
         const acceptsGroup = () => group !== null && this.dragGroup !== null && this.dragGroup !== group
         element.addEventListener('dragover', event => {
             if (this.dragTagIndex === null && !acceptsGroup()) {
@@ -2592,8 +2557,11 @@ export class AITerminalPanel {
     private endSavedDrag (): void {
         this.dragTagIndex = null
         this.dragGroup = null
+        if (this.groupMenuOpenedForDrag) {
+            this.closeGroupMenu()
+        }
         this.groupMenu?.classList.remove('is-dragging-tag')
-        for (const container of [this.savedGroupBar, this.savedCommandTabs, this.groupMenu]) {
+        for (const container of [this.savedCommandTabs, this.groupMenu]) {
             if (!container) {
                 continue
             }
@@ -2603,7 +2571,7 @@ export class AITerminalPanel {
         }
     }
 
-    private isBeforeMidpoint (element: HTMLElement, event: MouseEvent, axis: 'x'|'y' = 'x'): boolean {
+    private isBeforeMidpoint (element: HTMLElement, event: MouseEvent, axis: 'x'|'y'): boolean {
         const rect = element.getBoundingClientRect()
         return axis === 'x' ? event.clientX < rect.left + rect.width / 2 : event.clientY < rect.top + rect.height / 2
     }
@@ -2686,47 +2654,30 @@ export class AITerminalPanel {
         return this.config.store.aiTerminal.senderCommandInsertMode === 'append' ? 'append' : 'replace'
     }
 
-    private senderSection (body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
-        const section = document.createElement('div')
-        section.className = 'ai-panel-section ai-sender-section'
-
+    /** The draft with the saved tag toolbar above it and the send buttons below */
+    private senderSection (body: HTMLElement, buttons: HTMLElement[]): HTMLElement {
+        const section = this.section(null, body, buttons)
+        section.classList.add('ai-sender-section')
         const heading = document.createElement('div')
         heading.className = 'ai-sender-heading'
-
         heading.append(this.createSavedCommandToolbar())
-        section.append(heading, body)
-
-        if (buttons.length) {
-            const actions = document.createElement('div')
-            actions.className = 'ai-panel-actions'
-            actions.append(...buttons)
-            section.appendChild(actions)
-        }
-
+        section.prepend(heading)
         return section
     }
 
-    private section (title: string, body: HTMLElement, buttons: HTMLElement[] = []): HTMLElement {
+    private section (title: string|null, body: HTMLElement, buttons: HTMLElement[]): HTMLElement {
         const section = document.createElement('div')
         section.className = 'ai-panel-section'
-
-        const heading = document.createElement('div')
-        heading.className = 'ai-panel-title'
-        heading.textContent = title
-
-        if (body.tagName === 'PRE') {
-            body.classList.add(title.includes('Output') ? 'ai-output' : 'ai-analysis')
+        if (title) {
+            const heading = document.createElement('div')
+            heading.className = 'ai-panel-title'
+            heading.textContent = title
+            section.appendChild(heading)
         }
-
-        section.append(heading, body)
-
-        if (buttons.length) {
-            const actions = document.createElement('div')
-            actions.className = 'ai-panel-actions'
-            actions.append(...buttons)
-            section.appendChild(actions)
-        }
-
+        const actions = document.createElement('div')
+        actions.className = 'ai-panel-actions'
+        actions.append(...buttons)
+        section.append(body, actions)
         return section
     }
 
@@ -2876,7 +2827,6 @@ export class AITerminalPanel {
     private renderReferenceFolder (): void {
         const hasFolder = Boolean(this.referenceFolder)
         this.clearReferenceFolderButton.hidden = !hasFolder
-        this.referenceFolderPathElement.hidden = false
         this.referenceFolderPathElement.classList.toggle('is-empty', !hasFolder)
         if (!this.referenceFolder) {
             this.referenceFolderPathElement.textContent = 'not selected - click to choose'

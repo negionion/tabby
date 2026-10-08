@@ -5,7 +5,7 @@ installDom(dom)
 const { AITerminalPanel } = loadPanel()
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const ok = (name, cond, extra = '') => console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  | ' + extra : ''}`)
-const sent = [], boxes = []; let decide = 0, clip = null, handlers = null
+const sent = [], boxes = []; let clip = null, handlers = null
 const host = document.getElementById('tab')
 const tab = { element: { nativeElement: host }, title: 'Console_ASUS1 - COM10', customTitle: null, sendInput: t => sent.push(t), frontend: { focus () {} }, configure () {} }
 const sub = { subscribe: () => ({ unsubscribe () {} }) }
@@ -13,7 +13,7 @@ const store = { aiTerminal: { maxSessionOutputLines: 1000, ignoreEmptyEnterPromp
 const config = { store, save: async () => {}, changed$: sub }
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto', 'opus'], getClaudeModelStatus: () => undefined, checkSelectedProviderStatus: async () => ({ provider: 'claude', state: 'logged-in', label: 'ok' }), publishStatus () {} }
 const runner = { run (req, h) { handlers = h; return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
-const platform = { showMessageBox: async o => { boxes.push(o); return { response: decide } }, setClipboard: ({ text }) => { clip = text } }
+const platform = { showMessageBox: async o => { boxes.push(o); return { response: 0 } }, setClipboard: ({ text }) => { clip = text } }
 const p = new AITerminalPanel(tab, auth, runner, config, platform)
 host.append(p.element, p.senderElement)
 p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
@@ -23,7 +23,7 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('labels', [...p.header.querySelectorAll('.ai-header-label')].map(x => x.textContent).join(',') === 'Model,Mode,Effort,Folder')
   ok('rows visible when signed in', p.modelRow.style.display === '' && p.modeRow.style.display === '')
   ok('identity line', p.signedInIdentity.textContent === 'Session: new', p.signedInIdentity.textContent)
-  ok('buttons renamed', p.resetSessionButton.textContent === 'New session' && p.headerControls.contains(p.moreButton))
+  ok('New session button, ⋯ menu in the header controls', p.resetSessionButton.textContent === 'New session' && p.headerControls.contains(p.moreButton))
   ok('effort options plain', [...p.effortSelect.options].map(o => o.textContent).join(',') === 'auto,low,medium,high,xhigh,max')
   // sender target + collapse
   ok('target tab named in the send button tooltips', p.senderLineButton.title === 'Send the first line to Console_ASUS1 - COM10' && p.senderAllButton.title.startsWith('Send every line to Console_ASUS1 - COM10') && !p.senderElement.querySelector('.ai-sender-title'), p.senderLineButton.title)
@@ -48,11 +48,9 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('suggested target shown', p.chatHistory.querySelector('.ai-suggested-target').textContent === '→ Console_ASUS1 - COM10')
   // inline send
   rows[0].querySelectorAll('button')[0].click(); await sleep(10)
-  ok('safe command sent without prompt', sent.at(-1) === 'wifi status\r' && boxes.length === 0)
-  decide = 1; rows[1].querySelectorAll('button')[0].click(); await sleep(10)
-  ok('dangerous command asks, Cancel blocks it', boxes.length === 1 && sent.at(-1) === 'wifi status\r', boxes[0] && boxes[0].message)
-  decide = 0; rows[1].querySelectorAll('button')[0].click(); await sleep(10)
-  ok('dangerous command sent after confirm', sent.at(-1) === 'reboot\r')
+  ok('command sent without prompt', sent.at(-1) === 'wifi status\r' && boxes.length === 0)
+  rows[1].querySelectorAll('button')[0].click(); await sleep(10)
+  ok('reboot sent without prompt too', sent.at(-1) === 'reboot\r' && boxes.length === 0)
   // → and All → follow senderCommandInsertMode (default replace)
   const allTo = p.chatHistory.querySelector('.ai-suggested-head button')
   rows[0].querySelectorAll('button')[1].click()
@@ -75,9 +73,8 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   await p.sendDraftAll()
   ok('all lines sent at once, in order, without waiting for a prompt; draft cleared', sent.join(',') === 'cmd1\r,cmd2\r,cmd3\r' && p.draft.value === '')
   ok('no Stop button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Stop'))
-  // dangerous in Send all asks once for the batch
-  boxes.length = 0; decide = 1; p.draft.value = 'ls\nuci commit wireless\nfirstboot'; sent.length = 0; await p.sendDraftAll()
-  ok('batch with dangerous lines asks once, cancel sends nothing', boxes.length === 1 && boxes[0].detail === 'uci commit wireless\nfirstboot' && sent.length === 0)
+  p.draft.value = 'ls\nuci commit wireless\nfirstboot'; sent.length = 0; p.sendDraftAll()
+  ok('Send all sends every command without asking', sent.join(',') === 'ls\r,uci commit wireless\r,firstboot\r' && boxes.length === 0)
   // tags with variables
   await p.saveSenderCommand('station dump', 'iw dev {{iface}} station dump', '', null)
   ok('tag saved, hint gone', p.savedCommandTabs.querySelectorAll('.ai-saved-command-tab').length === 1 && !p.savedCommandTabs.querySelector('.ai-saved-command-hint'))
@@ -91,7 +88,7 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('edit dialog has Delete', !!del); del.click(); await sleep(10)
   ok('tag deleted', store.aiTerminal.savedSenderCommands.length === 0 && !document.querySelector('.ai-sender-tag-editor-overlay'))
   for (let i = 0; i < 15; i++) await p.saveSenderCommand('', `c${i}`, '', null)
-  ok('more than 10 tags kept', p.getSavedSenderCommands().length === 15)
+  ok('15 tags kept (limit is 100)', p.getSavedSenderCommands().length === 15)
   // no Clear button
   ok('sender has no Clear button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Clear'))
   // collapse back

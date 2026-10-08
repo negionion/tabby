@@ -8,18 +8,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 let failed = 0
 const ok = (name, cond, extra = '') => { if (!cond) failed++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  | ' + extra : ''}`) }
 const host = document.getElementById('tab')
-const sent = []
-const tab = { element: { nativeElement: host }, title: 'COM10', customTitle: null, sendInput: t => sent.push(t), frontend: { focus () {} }, configure () { configures++ } }
+const tab = { element: { nativeElement: host }, title: 'COM10', customTitle: null, sendInput () {}, frontend: { focus () {} }, configure () { configures++ } }
 let configures = 0
 const sub = { subscribe: () => ({ unsubscribe () {} }) }
 const store = { aiTerminal: { maxSessionOutputLines: 5, savedSenderCommands: [], ignoreEmptyEnterPrompts: false } }
 const statusChanged = new Subject()
-let updating = false, finish = null, provider = 'claude', modelCalls = 0
+let updating = false, finish = null, provider = 'claude'
 const auth = {
   statusChanged$: statusChanged, cliUpdated$: sub, isCliUpdating: () => updating, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined,
   waitForCliUpdate: () => updating ? new Promise(r => { finish = () => { updating = false; r() } }) : Promise.resolve(),
   getSelectedProvider: () => provider, getSelectedModel: () => 'opus',
-  getAvailableModels: async p => { modelCalls++; await sleep(20); return p === 'claude' ? ['auto', 'opus', 'sonnet'] : ['auto', 'gpt-5.4'] },
+  getAvailableModels: async p => { await sleep(20); return p === 'claude' ? ['auto', 'opus', 'sonnet'] : ['auto', 'gpt-5.4'] },
   getClaudeModelStatus: () => undefined, publishStatus () {}, clearClaudeModelCache () {},
 }
 const runs = []

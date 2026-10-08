@@ -7,7 +7,6 @@ export interface AIProviderStatus {
     state: AIProviderState
     label: string
     detail?: string
-    account?: string
 }
 
 export interface AIProviderDefinition {

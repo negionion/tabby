@@ -55,7 +55,7 @@ const mouse = (el, type) => el.dispatchEvent(new dom.window.MouseEvent(type, { b
   await sleep(10)
   ok('saved with trimmed group', saved() === '5000 upgrade,check Wi-Fi,5000 env@EAP5000', saved())
   ok('one group selector appears, showing All', !bar().hidden && bar().querySelectorAll('.ai-saved-group-chip').length === 1 && selectorText() === 'All:3', selectorText())
-  ok('chip bar is not hidden once groups exist (Bootstrap hides [hidden] with !important)', !bar().closest('[hidden]'))
+  ok('group selector is not hidden once groups exist (Bootstrap hides [hidden] with !important)', !bar().closest('[hidden]'))
 
   // mixed data
   store.aiTerminal.savedSenderCommands = [
@@ -202,8 +202,24 @@ const mouse = (el, type) => el.dispatchEvent(new dom.window.MouseEvent(type, { b
   host.addEventListener('drop', () => { leaked = true })
   drag(tabEl('a2'), tabEl('a3'), 1); await sleep(10)
   ok('drop does not bubble to the terminal host', !leaked)
+  // a tag drag opens a closed list and closes it again when the drag ends
+  p.closeGroupMenu()
+  fire(tabEl('b1'), 'dragstart'); await sleep(10)
+  ok('dragging a tag opens the list, Ungrouped shown', !!groupMenu() && groupMenu().classList.contains('is-dragging-tag') && !!tabEl('b1'))
+  fire(tabEl('b1'), 'dragend')
+  ok('the list closes when that drag ends', !groupMenu())
+  fire(tabEl('b1'), 'dragstart'); await sleep(10)
+  const target = rows().find(r => r.querySelector('.ai-group-menu-name').textContent === 'A')
+  fire(target, 'dragover'); fire(target, 'drop'); await sleep(10)
+  ok('drop on a group in the opened list moves the tag and closes the list', saved().endsWith('b1@A') && !groupMenu(), saved())
+  p.savedGroupBar.hidden = true
+  fire(tabEl('u1'), 'dragstart'); await sleep(10)
+  ok('no groups: dragging opens nothing', !groupMenu())
+  fire(tabEl('u1'), 'dragend')
+  p.renderSavedCommandTabs()
 
   // closing the list
+  openGroups()
   mouse(tabEl('a2'), 'mousedown')
   ok('pressing a tag keeps the list open (tags can be dropped on groups)', !!groupMenu())
   mouse(p.draft, 'mousedown')

@@ -6,7 +6,7 @@ let failed = 0
 const ok = (name, cond, extra = '') => { if (!cond) failed++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  | ' + extra : ''}`) }
 const mode = m => fs.writeFileSync(`${H}/claude.mode`, m)
 const calls = () => (fs.existsSync(`${H}/calls.log`) ? fs.readFileSync(`${H}/calls.log`, 'utf8').trim().split('\n').filter(Boolean).length : 0)
-const store = { aiTerminal: { provider: 'claude', model: 'auto', providerModels: {}, cliAutoUpdate: true, cliUpdateIntervalHours: 24, cliUpdateStatus: {}, claudeModelCandidates: ['haiku'], claudeModelCacheHours: 24, claudeModelCache: { checkedAt: Date.now(), results: { haiku: { state: 'ok' } } } } }
+const store = { aiTerminal: { cliAutoUpdate: true, cliUpdateIntervalHours: 24, cliUpdateStatus: {} } }
 let saves = 0
 const a = new AIProviderAuthService({ store, save: async () => { saves++ } }, { showMessageBox: async () => ({ response: 1 }) })
 const events = []; a.cliUpdated$.subscribe(p => events.push(`${p}:${a.isCliUpdating(p)}`))

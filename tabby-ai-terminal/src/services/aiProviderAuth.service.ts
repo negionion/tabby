@@ -353,7 +353,6 @@ export class AIProviderAuthService {
                     state: 'logged-in',
                     label: `${provider.label} is signed in`,
                     detail: output.trim(),
-                    account: this.extractAccountLabel(output),
                 }
             }
             return {
@@ -720,16 +719,6 @@ export class AIProviderAuthService {
             reject(new Error(output || error.message))
         } else {
             resolve(output)
-        }
-    }
-
-    private extractAccountLabel (output: string): string {
-        try {
-            const data = JSON.parse(output)
-            return data.email ?? data.account ?? data.subscriptionType ?? data.authMethod ?? 'Signed in'
-        } catch {
-            const line = output.split(/\r?\n/).find(item => /logged in|signed in/i.test(item))?.trim()
-            return line ?? 'Signed in'
         }
     }
 

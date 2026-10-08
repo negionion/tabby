@@ -14,7 +14,7 @@ const store = { aiTerminal: { maxSessionOutputLines: 1000, savedSenderCommands: 
 const cliUpdated = new Subject()
 let updating = false, finish = null, status
 const clicks = []
-let known, rechecks = 0, menu = null, logouts = 0
+let known, rechecks = 0, menu = null
 const auth = {
   statusChanged$: sub, cliUpdated$: cliUpdated,
   isCliUpdating: () => updating,
@@ -27,7 +27,7 @@ const auth = {
 }
 const runs = []
 const runner = { run (req, h) { runs.push(h); return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
-const p = new AITerminalPanel(tab, auth, runner, { store, save: async () => {}, changed$: sub }, { showMessageBox: async () => { logouts++; return { response: 1 } }, popupContextMenu: items => { menu = items } })
+const p = new AITerminalPanel(tab, auth, runner, { store, save: async () => {}, changed$: sub }, { showMessageBox: async () => ({ response: 1 }), popupContextMenu: items => { menu = items } })
 host.append(p.element, p.senderElement)
 p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
 const identity = () => p.signedInIdentity.textContent
@@ -36,7 +36,7 @@ const identity = () => p.signedInIdentity.textContent
   known = '2.1.283'; cliUpdated.next('claude')
   ok('identity shows the CLI version', identity() === 'Session: new · Claude Code 2.1.283', identity())
   const more = p.moreButton
-  ok('⋯ button in the header controls, Logout button gone', !more.hidden && p.headerControls.contains(more) && !p.headerControls.querySelector('.btn-danger, .btn-outline-danger'))
+  ok('⋯ button in the header controls, no Logout button', !more.hidden && p.headerControls.contains(more) && !p.headerControls.querySelector('.btn-danger, .btn-outline-danger'))
   more.click()
   ok('⋯ menu: update with version, re-check, separator, log out', menu.map(i => i.label || i.type).join('|') === 'Update Claude Code CLI (2.1.283)|Re-check model availability|separator|Log out of Claude Code...', menu.map(i => i.label || i.type).join('|'))
   menu[0].click()

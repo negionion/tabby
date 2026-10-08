@@ -18,9 +18,9 @@ host.append(p.element, p.senderElement)
 p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' }); p.visible = true; p.render()
 const summaryText = () => p.latestOutputSummary.textContent
 ;(async () => {
-  ok('chat section title removed', !p.content.textContent.includes('AI Chat Panel'))
+  ok('chat section has no title', !p.content.textContent.includes('AI Chat Panel'))
   ok('names: Output to send / Clear output', summaryText().includes('Output to send') && p.clearLatestButton.textContent === 'Clear output')
-  ok('empty state shown on fresh session; example chips replaced by a … button next to the question', !p.emptyState.hidden && !p.chatBody.querySelector('.ai-example-chip') && p.exampleButton.parentElement === p.question.parentElement)
+  ok('empty state shown on fresh session; example questions behind the lightbulb in the question box', !p.emptyState.hidden && !p.chatBody.querySelector('.ai-example-chip') && p.exampleButton.parentElement === p.question.parentElement)
   ok('placeholder mentions Enter/Shift+Enter', p.question.placeholder.includes('Enter to send') && p.question.title.includes('Shift+Enter') && p.question.rows === 1)
   p.appendOutput('root@asus:~# wifi status\r\n{ "up": true }\r\n'); p.render()
   ok('output arrives on empty chat -> auto expanded', p.latestOutputDetails.open === true)
@@ -42,7 +42,7 @@ const summaryText = () => p.latestOutputSummary.textContent
   ok('answer label is provider name', card.querySelector('.ai-message-label').textContent === 'Claude')
   const meta = card.querySelector('.ai-answer-meta').textContent
   ok('meta: model, mode, seconds', /^opus · Edit automatically · \d+\.\ds$/.test(meta), meta)
-  ok('sent block renamed', card.textContent.includes('Output sent'))
+  ok('sent block labeled Output sent', card.textContent.includes('Output sent'))
   const btns = [...card.querySelectorAll('.ai-answer-actions button')]; const copyBtn = btns.find(b => b.textContent === 'Copy'), retryBtn = btns.find(b => b.textContent === 'Retry')
   copyBtn.click(); ok('Copy copies raw answer text', clip && clip.startsWith('The radio is **up**.') && clip.includes('iw dev'))
   retryBtn.click(); await sleep(10)

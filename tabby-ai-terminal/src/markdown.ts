@@ -14,7 +14,7 @@ export function extractSuggestedCommands (text: string): { commands: string[], r
     return { commands, rest: `${text.slice(0, match.index)}${match[1]}${text.slice(match.index + match[0].length)}`.trimEnd() }
 }
 
-export function renderInline (parent: HTMLElement, text: string, openLink: OpenLink): void {
+function renderInline (parent: HTMLElement, text: string, openLink: OpenLink): void {
     let buffer = ''
     const flush = () => {
         if (buffer) {

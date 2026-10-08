@@ -166,14 +166,9 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-saved-command-tab.has-group.is-active {
     border-left: 3px solid var(--ai-group-accent);
 }
-.ai-saved-command-tab:hover,
-.ai-saved-command-control:hover {
+.ai-saved-command-tab:hover {
     background: rgba(143, 211, 255, 0.16);
     border-color: rgba(143, 211, 255, 0.36);
-}
-.ai-saved-command-control.is-remove:hover,
-.ai-saved-command-control.is-add:hover {
-    background: transparent;
 }
 .ai-saved-command-tab.is-active {
     color: #0b141d;
@@ -186,17 +181,9 @@ export const AI_TERMINAL_PANEL_STYLES = `
     background: transparent;
     white-space: nowrap;
 }
-.ai-saved-command-control.is-remove {
-    color: #ff8d8d;
-    border-color: rgba(255, 96, 96, 0.75);
-}
 .ai-saved-command-control.is-add {
     color: #8cff75;
     border-color: rgba(124, 255, 96, 0.78);
-}
-.ai-saved-command-control.is-remove:hover {
-    background: rgba(255, 96, 96, 0.12);
-    border-color: #ff6060;
 }
 .ai-saved-command-control.is-add:hover {
     background: rgba(124, 255, 96, 0.12);
@@ -751,54 +738,16 @@ export const AI_TERMINAL_PANEL_STYLES = `
 }
 .ai-markdown {
     white-space: normal;
-}
-.ai-markdown p {
-    margin: 0 0 8px;
-}
-.ai-markdown ul,
-.ai-markdown ol {
-    margin: 0 0 8px;
-    padding-left: 1.4em;
-}
-.ai-markdown code {
-    padding: 0 3px;
-    border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
-    color: #ffd58a;
-}
-.ai-markdown .ai-md-code {
-    margin: 0 0 8px;
-    padding: 8px;
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.35);
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-.ai-markdown .ai-md-heading {
-    margin: 4px 0 6px;
-    color: #8fd3ff;
-    font-weight: 700;
-}
-.ai-markdown .ai-md-h1,
-.ai-markdown .ai-md-h2 {
-    font-size: 1.1em;
-}
-.ai-markdown .ai-md-table {
-    margin: 0 0 8px;
-    border-collapse: collapse;
-}
-.ai-markdown .ai-md-table th,
-.ai-markdown .ai-md-table td {
-    padding: 2px 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    text-align: left;
-}
-.ai-markdown {
     color: #e6edf3;
     line-height: 1.6;
 }
 .ai-markdown p {
     margin: 0 0 10px;
+}
+.ai-markdown ul,
+.ai-markdown ol {
+    margin: 0 0 8px;
+    padding-left: 1.4em;
 }
 .ai-markdown > :last-child {
     margin-bottom: 0;
@@ -822,29 +771,48 @@ export const AI_TERMINAL_PANEL_STYLES = `
     color: #f0f6fc;
 }
 .ai-markdown code {
-    color: #f2cc8f;
-    background: rgba(255, 255, 255, 0.07);
-    border-radius: 4px;
     padding: 1px 4px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #f2cc8f;
     font-size: 0.95em;
 }
 .ai-markdown .ai-md-code {
+    margin: 0 0 8px;
+    padding: 8px;
     border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    color: #dce6f0;
     line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
-.ai-markdown .ai-md-code,
 .ai-markdown .ai-md-code * {
     color: #dce6f0;
     background: transparent;
 }
-.ai-markdown .ai-md-code {
-    background: rgba(0, 0, 0, 0.35);
-}
 .ai-markdown .ai-md-heading {
     margin: 12px 0 6px;
+    color: #8fd3ff;
+    font-weight: 700;
 }
 .ai-markdown > .ai-md-heading:first-child {
     margin-top: 0;
+}
+.ai-markdown .ai-md-h1,
+.ai-markdown .ai-md-h2 {
+    font-size: 1.1em;
+}
+.ai-markdown .ai-md-table {
+    margin: 0 0 8px;
+    border-collapse: collapse;
+}
+.ai-markdown .ai-md-table th,
+.ai-markdown .ai-md-table td {
+    padding: 2px 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    text-align: left;
 }
 .ai-markdown blockquote {
     margin: 0 0 10px;
@@ -931,12 +899,10 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-panel-title { font-size: var(--ai-terminal-font-size); font-weight: 700; color: #8fd3ff; }
 .ai-terminal-panel textarea,
 .ai-terminal-sender textarea {
-    resize: vertical;
     background: rgba(255, 255, 255, 0.05);
     color: #eef6ff;
     border-color: rgba(255, 255, 255, 0.1);
 }
-.ai-terminal-sender textarea { resize: none; }
 .ai-terminal-panel textarea.ai-question-input {
     flex: 0 0 auto;
     resize: none;
@@ -973,10 +939,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-example-button:focus-visible {
     color: #cfe9ff;
     background: rgba(143, 211, 255, 0.12);
-}
-.ai-example-button:disabled {
-    opacity: 0.5;
-    cursor: default;
 }
 .ai-answer-note {
     margin: 2px 0 6px;
@@ -1166,7 +1128,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
     background: rgba(255, 255, 255, 0.05);
     color: #d7e7f5;
     font-size: var(--ai-terminal-font-size);
-    max-height: 160px;
     overflow: auto;
 }
 .ai-output-collapse > .ai-output {

@@ -88,11 +88,11 @@ When the panel checks the selected provider, the plugin runs `claude update` or 
 ## Panel
 
 - **Header**: provider, New session and a ⋯ menu (Update CLI, Re-check model availability, Log out), then model, mode, effort and reference folder rows. Click the folder field to choose a folder and ✕ to clear it. The chevron bar collapses the header into a one-line summary.
-- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons; → Sender and All → replace the sender content or are added after it, as the Sender insert mode setting says. The lightbulb inside the question box lists example questions and the last five questions asked; choosing one only fills the box.
+- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with ▶ (send now), → (into the sender) and Copy buttons; → and All → replace the sender content or are added after it, as the Sender insert mode setting says. The lightbulb inside the question box lists example questions and the last five questions asked; choosing one only fills the box.
 - **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
-- **Sender**: commands to send to the current terminal. Send next sends the first line; Send all sends every line at once. Commands matching `dangerousCommandPatterns` ask for confirmation first (once for the whole batch). An empty sender collapses to one line (`senderAutoCollapse`).
+- **Sender**: commands to send to the current terminal. Send next sends the first line; Send all sends every line at once. An empty sender collapses to one line (`senderAutoCollapse`).
 - **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. Tags are listed in a row at the top of the sender: click one to insert it, right-click it to edit it, move or duplicate it to another group, or delete it, and drag it to reorder. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.
-- **Tag groups**: a tag can belong to a group, set in the tag dialog or with Move to group. When any tag has a group, a group selector before the tags shows the current group; it opens a list (upwards) of All, each group and Ungrouped with their tag counts, and choosing one shows that group's tags. In the list, right-click a group to insert all of its commands into the sender, rename it, change its color, or delete it (its tags become ungrouped); drag a group to reorder groups, or drop a tag on a group to move it there. Each group has a color, shown on the selector and as a bar on its tags; colors are assigned automatically without repeats, or chosen from the palette or Custom... (any color).
+- **Tag groups**: a tag can belong to a group, set in the tag dialog or with Move to group. When any tag has a group, a group selector before the tags shows the current group; it opens a list (upwards) of All, each group and Ungrouped with their tag counts, and choosing one shows that group's tags. In the list, right-click a group to insert all of its commands into the sender, rename it, change its color, or delete it (its tags become ungrouped); drag a group to reorder groups. Dragging a tag opens the list (and closes it when the drag ends), so the tag can be dropped on a group to move it there. Each group has a color, shown on the selector and as a bar on its tags; colors are assigned automatically without repeats, or chosen from the palette or Custom... (any color).
 - **Resize**: drag the panel's left edge or the sender's top edge. Double-click a handle to restore the default size.
 
 ## Settings
@@ -101,6 +101,10 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 
 | Key | Default | Purpose |
 | --- | --- | --- |
+| `provider` | `codex` | Selected provider: `codex` or `claude`. |
+| `model` | `auto` | Selected model of the current provider. |
+| `providerModels` | `{}` | Last selected model of each provider. |
+| `savedSenderCommands` | `[]` | Saved sender tags: `name`, `command` and `group`. |
 | `claudeMode` | `plan` | Claude Code mode: `plan`, `manual`, `acceptEdits`, or `auto`. |
 | `claudeEffort` | `auto` | Claude Code effort: `auto`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `claudeModelCandidates` | `[]` | Models to probe. Empty uses the built-in candidate list. |
@@ -111,9 +115,8 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `senderHeight` | `178` | Sender height in pixels. |
 | `headerCollapsed` | `false` | Whether the panel header is collapsed. |
 | `senderAutoCollapse` | `true` | Collapse an empty sender to one line. |
-| `dangerousCommandPatterns` | `null` | Regular expressions for commands that need confirmation. `null` uses the built-in list. |
 | `senderVariables` | `{}` | Last values entered for `{{name}}` tag placeholders. |
-| `senderGroupFilter` | `''` | Group whose tags are shown in the sender. Empty shows all tags. |
+| `senderGroupFilter` | `''` | Group whose tags are shown in the sender. Empty shows all tags, `__ungrouped__` the tags without a group. |
 | `senderGroupColors` | `{}` | Chosen group colors: a palette name (`amber`, `blue`, `green`, `purple`, `pink`, `teal`, `red`, `gray`) or `#rrggbb`. |
 
 ## Project Structure
@@ -126,6 +129,7 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | `webpack.config.mjs` | Connects the plugin to Tabby's shared Webpack plugin configuration. |
 | `tsconfig.json` | TypeScript configuration used by the plugin source. |
 | `tsconfig.typings.json` | TypeScript configuration for emitting declarations into `typings/`. |
+| `test/` | Test runner, tests, stubs for Tabby and Angular imports, and stand-in CLIs. |
 | `scripts/pack-plugin.mjs` | Copies the built bundle, declarations, and package metadata into `export/`, then creates a ZIP archive. |
 | `dist/` | Generated Webpack output. |
 | `typings/` | Generated TypeScript declarations. |
@@ -160,7 +164,7 @@ Settings under `aiTerminal` in `config.yaml` that are not on the settings page:
 | Path | Purpose |
 | --- | --- |
 | `src/services/aiTerminal.service.ts` | Coordinates one AI panel per terminal tab and manages panel attachment, visibility, and captured I/O. |
-| `src/services/aiProviderAuth.service.ts` | Finds the provider CLI, checks authentication, starts login/logout flows, and discovers available models. |
+| `src/services/aiProviderAuth.service.ts` | Finds the provider CLI, checks authentication, starts login/logout flows, discovers available models, and updates the CLIs. |
 | `src/services/aiProviderRunner.service.ts` | Builds prompts, starts or resumes Codex and Claude Code CLI sessions, streams responses, and resolves optional reference folders. |
 
 ## Tests

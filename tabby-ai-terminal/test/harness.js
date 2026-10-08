@@ -1,11 +1,10 @@
-// Shared test helpers: stubs for Tabby/Angular imports, loading the transpiled sources, and PASS/FAIL output
-// that run.js counts.
+// Shared test helpers: stubs for Tabby/Angular imports, loading the transpiled sources, a jsdom window and a
+// temporary HOME.
 const Module = require('module')
 const path = require('path')
 
 const STUBS = {
     'tabby-core': path.join(__dirname, 'stubs', 'tabby-core.js'),
-    'tabby-terminal': path.join(__dirname, 'stubs', 'tabby-terminal.js'),
     '@angular/core': path.join(__dirname, 'stubs', 'angular-core.js'),
 }
 const resolveFilename = Module._resolveFilename

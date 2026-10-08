@@ -59,14 +59,14 @@ const received = (inv) => argv(cmdRun(buildLine(inv)).pop()).slice(1)
 
 const inv = a.buildProviderCommandInvocation('claude', want, 'C:\\work\\fw')
 const got = received(inv)
-ok('new: CLI receives exactly the arguments', JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got))
-ok('new: verbatim, cwd kept for a local folder', inv.windowsVerbatimArguments === true && inv.cwd === 'C:\\work\\fw')
-ok('new: code page switch still runs first', cmdRun(buildLine(inv))[0] === 'chcp 65001 >nul')
+ok('CLI receives exactly the arguments', JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got))
+ok('verbatim, cwd kept for a local folder', inv.windowsVerbatimArguments === true && inv.cwd === 'C:\\work\\fw')
+ok('code page switch runs first', cmdRun(buildLine(inv))[0] === 'chcp 65001 >nul')
 
-// the previous invocation: same command string, not verbatim, no outer quotes
+// why it is verbatim: the same command string without verbatim arguments and outer quotes
 const old = { args: ['/d', '/s', '/c', inv.args[3].slice(1, -1)], windowsVerbatimArguments: false }
 const gotOld = received(old)
-ok('old invocation mangled the arguments (reproduces the bug)', JSON.stringify(gotOld) !== JSON.stringify(want), JSON.stringify(gotOld.slice(0, 6)))
+ok('without verbatim arguments cmd.exe mangles them', JSON.stringify(gotOld) !== JSON.stringify(want), JSON.stringify(gotOld.slice(0, 6)))
 
 const unc = a.buildProviderCommandInvocation('claude', ['--print'], '\\\\wsl.localhost\\Ubuntu\\home\\asus_user\\code')
 const uncParts = cmdRun(buildLine(unc))

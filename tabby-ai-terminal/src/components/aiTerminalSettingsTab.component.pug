@@ -24,6 +24,9 @@ h3.mb-3(translate) AI terminal
         (keyup.enter)='$any($event.target).blur()',
     )
 
+.alert.alert-info
+    span(translate) This limit applies to the terminal output stored for the AI panel and used when you click Analyze.
+
 .form-line
     .header
         .title(translate) AI terminal font size
@@ -58,9 +61,6 @@ h3.mb-3(translate) AI terminal
     )
         option(value='replace', translate) Replace sender draft
         option(value='append', translate) Append to sender draft
-
-.alert.alert-info
-    span(translate) This limit applies to the terminal output stored for the AI panel and used when you click Analyze.
 
 h3.mt-4.mb-3(translate) Provider CLIs
 

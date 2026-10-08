@@ -31,7 +31,6 @@ export class AITerminalConfigProvider extends ConfigProvider {
             senderGroupFilter: '',
             senderGroupColors: {},
             senderAutoCollapse: true,
-            dangerousCommandPatterns: null,
             claudeMode: 'plan',
             claudeEffort: 'auto',
             claudeModelCandidates: [],
