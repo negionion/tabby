@@ -8,7 +8,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 const host = document.getElementById('tab'); const sub = { subscribe: () => ({ unsubscribe () {} }) }
 let opened = null, h = null
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['opus'], getClaudeModelStatus: () => undefined, publishStatus () {} }
-const p = new AITerminalPanel({ element: { nativeElement: host }, title: 'T', sendInput () {}, frontend: { focus () {} }, configure () {} }, auth, { run (r, x) { h = x; return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }, { store: { aiTerminal: { maxSessionOutputLines: 1000, savedSenderCommands: [] } }, save: async () => {}, changed$: sub }, { showMessageBox: async () => ({ response: 0 }), openExternal: u => { opened = u }, setClipboard () {} })
+const p = new AITerminalPanel({ element: { nativeElement: host }, title: 'T', sendInput () {}, frontend: { focus () {} }, configure () {} }, auth, { run (r, x) { h = x; return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }, { store: { aiTerminal: { maxSessionOutputLines: 1000, savedSenderCommands: [] } }, save: async () => {}, changed$: sub }, { showMessageBox: async () => ({ response: 0 }), openExternal: u => { opened = u }, setClipboard () {} })
 host.append(p.element, p.senderElement); p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
 const { renderMarkdown } = require('./harness').load('markdown')
 const md = t => renderMarkdown(t, url => { opened = url })

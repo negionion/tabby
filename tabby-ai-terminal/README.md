@@ -75,7 +75,7 @@ The Mode selector controls the tools and permission mode passed to Claude Code:
 | Edit automatically | `acceptEdits` | Read, Glob, Grep, Edit, Write |
 | Auto | `auto` | Read, Glob, Grep, Edit, Write, Bash |
 
-Without a reference folder every mode runs as Plan. Non-Plan modes run Claude Code with `--input-format stream-json --permission-prompt-tool stdio`; each permission request is shown in the chat as an Allow/Deny card. The Effort selector passes `--effort` (`auto` omits it).
+Without a reference folder every mode runs as Plan; the first answer of a session notes this above the answer. Non-Plan modes run Claude Code with `--input-format stream-json --permission-prompt-tool stdio`; each permission request is shown in the chat as an Allow/Deny card. The Effort selector passes `--effort` (`auto` omits it).
 
 ### Claude Code models
 
@@ -88,7 +88,7 @@ When the panel checks the selected provider, the plugin runs `claude update` or 
 ## Panel
 
 - **Header**: provider, New session and a ⋯ menu (Update CLI, Re-check model availability, Log out), then model, mode, effort and reference folder rows. Click the folder field to choose a folder and ✕ to clear it. The chevron bar collapses the header into a one-line summary.
-- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons.
+- **Chat**: answers are rendered as Markdown, with Open (full-size viewer), Copy, and Retry actions. Commands under a "Suggested commands" heading are listed as rows with Send, → Sender, and Copy buttons. The lightbulb inside the question box lists example questions and the last five questions asked; choosing one only fills the box.
 - **Output to send**: the captured terminal output that the next Analyze request includes. It is expanded while the chat is empty and collapsed once an answer is shown.
 - **Sender**: commands to send to the current terminal. Send next sends the first line. Send all sends one line at a time, waits for the terminal prompt (`senderPromptPattern`) before the next line, and stops when the prompt does not return within `senderLineTimeoutMs` or when Stop is pressed. Commands matching `dangerousCommandPatterns` ask for confirmation. An empty sender collapses to one line (`senderAutoCollapse`).
 - **Saved tags**: + Save stores the sender content as a tag, up to 100 tags. The tags are listed in a menu that opens upwards from the chips at the top of the sender: click a tag to insert it, right-click it to edit it, move it to another group or delete it, and drag it to reorder. `{{name}}` placeholders are filled in through a dialog when the tag is inserted, and the last values are remembered.

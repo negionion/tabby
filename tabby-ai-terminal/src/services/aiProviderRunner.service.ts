@@ -83,9 +83,6 @@ export class AIProviderRunnerService {
         const claudeSessionID = provider.id === 'claude' ? request.sessionID ?? this.createSessionID() : null
         const claudeSettings = provider.id === 'claude' ? this.getClaudeRunSettings(referenceFolder) : null
         const claudeInteractive = !!claudeSettings?.interactive
-        if (claudeSettings && claudeSettings.requested !== claudeSettings.mode) {
-            handlers.output(`[No folder selected - running in Plan (read-only) mode. Select a folder to use ${claudeSettings.requested}.]\n\n`)
-        }
         const child = provider.id === 'claude'
             ? this.spawnClaude(request, claudeSessionID!, referenceFolder)
             : this.spawnCodex(request, referenceFolder)

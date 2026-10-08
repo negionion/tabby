@@ -15,7 +15,7 @@ const store = { aiTerminal: { maxSessionOutputLines: 1000, senderGroupColors: {}
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto'], getClaudeModelStatus: () => undefined, publishStatus () {} }
 let menu = null
 const platform = { showMessageBox: async () => ({ response: 0 }), setClipboard () {}, popupContextMenu: items => { menu = items } }
-const p = new AITerminalPanel(tab, auth, { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }, { store, save: async () => {}, changed$: sub }, platform)
+const p = new AITerminalPanel(tab, auth, { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }, { store, save: async () => {}, changed$: sub }, platform)
 host.append(p.element, p.senderElement)
 const chip = name => [...p.savedGroupBar.querySelectorAll('.ai-saved-group-chip')].find(c => c.querySelector('.ai-saved-group-name').textContent === name)
 // Tags are listed in the menu of the All chip

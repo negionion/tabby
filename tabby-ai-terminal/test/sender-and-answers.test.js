@@ -12,7 +12,7 @@ const sub = { subscribe: () => ({ unsubscribe () {} }) }
 const store = { aiTerminal: { maxSessionOutputLines: 1000, ignoreEmptyEnterPrompts: true, savedSenderCommands: [], claudeMode: 'plan', senderLineTimeoutMs: 400 } }
 const config = { store, save: async () => {}, changed$: sub }
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto', 'opus'], getClaudeModelStatus: () => undefined, checkSelectedProviderStatus: async () => ({ provider: 'claude', state: 'logged-in', label: 'ok' }), publishStatus () {} }
-const runner = { run (req, h) { handlers = h; return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }
+const runner = { run (req, h) { handlers = h; return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
 const platform = { showMessageBox: async o => { boxes.push(o); return { response: decide } }, setClipboard: ({ text }) => { clip = text } }
 const p = new AITerminalPanel(tab, auth, runner, config, platform)
 host.append(p.element, p.senderElement)

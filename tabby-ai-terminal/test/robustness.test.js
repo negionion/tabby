@@ -23,7 +23,7 @@ const auth = {
   getClaudeModelStatus: () => undefined, publishStatus () {}, clearClaudeModelCache () {},
 }
 const runs = []
-const runner = { run (req, h) { runs.push({ req, h }); return { cancel () { h.cancelled = true } } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }
+const runner = { run (req, h) { runs.push({ req, h }); return { cancel () { h.cancelled = true } } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
 const p = new AITerminalPanel(tab, auth, runner, { store, save: async () => {}, changed$: sub }, { showMessageBox: async () => ({ response: 0 }), popupContextMenu () {} })
 host.append(p.element, p.senderElement)
 p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
@@ -66,12 +66,11 @@ const lines = () => p.capture.getDisplayLines().join('|')
   ok('after the answer: chat kept, next question starts a new session', p.chatHistory.childElementCount > 0 && p.aiSessionID === null && !p.analyzing)
   statusChanged.next({ provider: 'claude', state: 'logged-in', label: 'ok' }); provider = 'claude'
   statusChanged.next({ provider: 'claude', state: 'logged-in', label: 'ok' })
-  // analyze while a CLI update runs: example chip / Enter cannot start a second run
+  // analyze while a CLI update runs: a second Analyze / Enter cannot start a second run
   updating = true
   p.question.value = 'q2'
   const a1 = p.analyze(); await sleep(5)
-  const chip = p.exampleRow.querySelector('button')
-  chip && chip.click(); await p.analyze(); await sleep(5)
+  await p.analyze(); await sleep(5)
   ok('second Analyze during the update wait is ignored', runs.length === 1 && p.analyzing)
   // Esc cancels during the wait even though the question box is disabled
   p.element.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))

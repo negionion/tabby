@@ -923,25 +923,46 @@ export const AI_TERMINAL_PANEL_STYLES = `
     overflow-y: hidden;
     line-height: 1.5;
 }
-.ai-example-row {
+.ai-question-row {
+    position: relative;
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
 }
-.ai-example-row[hidden] {
-    display: none;
+.ai-question-row textarea.ai-question-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-right: 30px;
 }
-.ai-example-chip {
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(143, 211, 255, 0.35);
-    background: rgba(143, 211, 255, 0.08);
-    color: #cfe9ff;
-    font-size: calc(var(--ai-terminal-font-size) * 0.92);
+/* Sits inside the question box at its bottom right, so it stays put when the box grows */
+.ai-example-button {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #5f7487;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
 }
-.ai-example-chip:hover {
-    background: rgba(143, 211, 255, 0.18);
+.ai-example-button:hover,
+.ai-example-button:focus-visible {
+    color: #cfe9ff;
+    background: rgba(143, 211, 255, 0.12);
+}
+.ai-example-button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.ai-answer-note {
+    margin: 2px 0 6px;
+    color: #8fa7bd;
+    font-size: 0.9em;
+    font-style: italic;
 }
 .ai-empty-state {
     margin: auto 8px;

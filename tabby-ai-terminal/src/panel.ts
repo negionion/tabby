@@ -43,6 +43,10 @@ const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
     '\\buci\\s+(commit|import|batch)\\b', '\\bfw_setenv\\b', '^\\s*wifi(\\s+(up|down|reload))?\\s*$',
     '/etc/init\\.d/\\S+\\s+(stop|restart|disable)\\b', '\\bkillall\\b', '\\bkill\\s+-9\\b',
 ]
+const EXAMPLE_QUESTIONS = ['Why did the STA disconnect?', 'Summarize the errors and warnings in the output.']
+const RECENT_QUESTIONS = 5
+/** Longer questions are shortened in the menu; choosing one still fills in the whole question */
+const MENU_QUESTION_CHARS = 80
 const CLAUDE_MODE_LABELS: Partial<Record<string, string>> = { plan: 'Plan', manual: 'Manual', acceptEdits: 'Edit automatically', auto: 'Auto' }
 
 interface PendingPermission {
@@ -107,7 +111,7 @@ export class AITerminalPanel {
     /** While true the captured output opens on an empty chat and closes after Analyze */
     private latestOutputAuto = true
     private emptyState: HTMLElement
-    private exampleRow: HTMLElement
+    private exampleButton: HTMLButtonElement
     private jumpLatestButton: HTMLButtonElement
     private output: HTMLTextAreaElement
     private currentAnalysis: HTMLElement|null = null
@@ -138,6 +142,8 @@ export class AITerminalPanel {
     /** True from Analyze until the answer ends, including a wait for a CLI update */
     private analyzing = false
     private providerSwitchedDuringRun = false
+    /** The "runs as Plan without a folder" note is shown once per session */
+    private planFallbackNoticeShown = false
     private destroyed = false
     private openLink = (url: string): void => this.platform.openExternal(url)
     private modelOptionsProvider: AIProviderID|null = null
@@ -384,23 +390,13 @@ export class AITerminalPanel {
         this.emptyState = document.createElement('div')
         this.emptyState.className = 'ai-empty-state'
         this.emptyState.textContent = 'Output from this tab is captured automatically and shown in "Output to send". Ask a question, or press Analyze to explain the latest output.'
-        this.exampleRow = document.createElement('div')
-        this.exampleRow.className = 'ai-example-row'
-        for (const [label, prompt] of [
-            ['Analyze output', ''],
-            ['Why did the STA disconnect?', 'Why did the STA disconnect?'],
-            ['Summarize errors', 'Summarize the errors and warnings in the output.'],
-        ]) {
-            const chip = document.createElement('button')
-            chip.type = 'button'
-            chip.className = 'ai-example-chip'
-            chip.textContent = label
-            chip.addEventListener('click', () => {
-                this.question.value = prompt
-                void this.analyze()
-            })
-            this.exampleRow.appendChild(chip)
-        }
+        // Example questions only fill the question box, so a stray click never starts a run
+        this.exampleButton = button('', 'secondary', event => this.openExampleMenu(event))
+        // A borderless icon inside the question box, so it does not read as a separate control
+        this.exampleButton.className = 'ai-example-button'
+        this.exampleButton.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 1.75a4.25 4.25 0 0 0-2.5 7.69c.47.34.75.88.75 1.46v.6h3.5v-.6c0-.58.28-1.12.75-1.46A4.25 4.25 0 0 0 8 1.75z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M6.25 13.25h3.5M6.75 14.75h2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>'
+        this.exampleButton.title = 'Example and recent questions'
+        this.exampleButton.setAttribute('aria-label', 'Example and recent questions')
         this.chatHistory = document.createElement('div')
         this.chatHistory.className = 'ai-chat-history'
 
@@ -431,7 +427,10 @@ export class AITerminalPanel {
 
         this.chatViewport.append(this.emptyState, this.chatHistory)
         this.chatStack.append(this.chatViewport, this.jumpLatestButton, this.latestOutputDetails)
-        this.chatBody.append(this.chatStack, this.exampleRow, this.question)
+        const questionRow = document.createElement('div')
+        questionRow.className = 'ai-question-row'
+        questionRow.append(this.question, this.exampleButton)
+        this.chatBody.append(this.chatStack, questionRow)
     }
 
     /** Sender tag and group bars, the draft and the listeners that keep the sender open or collapse it */
@@ -718,6 +717,7 @@ export class AITerminalPanel {
             model: this.providerAuth.getSelectedModel(),
             mode: this.getEffectiveModeLabel(provider),
         }
+        this.notePlanFallback(provider)
 
         if (this.providerAuth.isCliUpdating(provider)) {
             // The CLI binary may be replaced during the update, so the run starts after it
@@ -789,6 +789,25 @@ export class AITerminalPanel {
             this.runHandle = null
             this.setRunning(false)
         }
+    }
+
+    /** Example questions, then the latest distinct questions asked in this panel; a choice only fills the question box */
+    private openExampleMenu (event: MouseEvent): void {
+        const fill = (question: string): MenuItemOptions => ({
+            label: question.length > MENU_QUESTION_CHARS ? `${question.slice(0, MENU_QUESTION_CHARS)}…` : question,
+            enabled: !this.analyzing,
+            click: () => {
+                this.question.value = question
+                this.updateQuestionBox()
+                this.question.focus()
+            },
+        })
+        const menu = EXAMPLE_QUESTIONS.map(fill)
+        const recent = [...new Set([...this.questionHistory].reverse())].slice(0, RECENT_QUESTIONS)
+        if (recent.length) {
+            menu.push({ type: 'separator' }, { label: 'Recent', enabled: false }, ...recent.map(fill))
+        }
+        this.platform.popupContextMenu(menu, event)
     }
 
     private createSettingSelect (key: string, options: [string, string][], fallback: string, title: string): HTMLSelectElement {
@@ -999,9 +1018,6 @@ export class AITerminalPanel {
         const hideEmptyState = !chatEmpty || lines.length > 0
         if (this.emptyState.hidden !== hideEmptyState) {
             this.emptyState.hidden = hideEmptyState
-        }
-        if (this.exampleRow.hidden !== !chatEmpty) {
-            this.exampleRow.hidden = !chatEmpty
         }
         const outputLines = this.latestOutputDetails.open ? lines : lines.slice(-VISIBLE_OUTPUT_LINES)
         const outputText = outputLines.join('\n')
@@ -1664,6 +1680,22 @@ export class AITerminalPanel {
                 this.requestTerminalRefit()
             }
         }
+    }
+
+    /** Once per session, above the answer (not in it, so Copy leaves it out): the selected mode needs a folder */
+    private notePlanFallback (provider: AIProviderID): void {
+        if (provider !== 'claude' || this.planFallbackNoticeShown || !this.currentAnalysis) {
+            return
+        }
+        const settings = this.providerRunner.getClaudeRunSettings(this.referenceFolder)
+        if (settings.requested === settings.mode) {
+            return
+        }
+        this.planFallbackNoticeShown = true
+        const note = document.createElement('div')
+        note.className = 'ai-answer-note'
+        note.textContent = `No folder selected, so this runs as Plan (read-only). Select a folder to use ${CLAUDE_MODE_LABELS[settings.requested] ?? settings.requested}.`
+        this.currentAnalysis.before(note)
     }
 
     private getEffectiveModeLabel (provider: AIProviderID): string {
@@ -2854,6 +2886,7 @@ export class AITerminalPanel {
 
     private resetAIChatSession (): void {
         this.aiSessionID = null
+        this.planFallbackNoticeShown = false
         this.currentAnalysis = null
         this.chatHistory.replaceChildren()
         this.latestOutputAuto = true

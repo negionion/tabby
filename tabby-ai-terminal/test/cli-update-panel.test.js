@@ -26,7 +26,7 @@ const auth = {
   getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto'], getClaudeModelStatus: () => undefined, publishStatus () {},
 }
 const runs = []
-const runner = { run (req, h) { runs.push(h); return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }
+const runner = { run (req, h) { runs.push(h); return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
 const p = new AITerminalPanel(tab, auth, runner, { store, save: async () => {}, changed$: sub }, { showMessageBox: async () => { logouts++; return { response: 1 } }, popupContextMenu: items => { menu = items } })
 host.append(p.element, p.senderElement)
 p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })

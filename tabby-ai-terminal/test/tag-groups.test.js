@@ -13,7 +13,7 @@ const store = { aiTerminal: { maxSessionOutputLines: 1000, savedSenderCommands: 
 let saves = 0
 const config = { store, save: async () => { saves++ }, changed$: sub }
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto'], getClaudeModelStatus: () => undefined, checkSelectedProviderStatus: async () => ({ provider: 'claude', state: 'logged-in', label: 'ok' }), publishStatus () {} }
-const runner = { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }
+const runner = { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }
 let menu = null, boxes = [], decide = 0
 const platform = { showMessageBox: async o => { boxes.push(o); return { response: decide } }, setClipboard () {}, popupContextMenu: items => { menu = items } }
 const p = new AITerminalPanel(tab, auth, runner, config, platform)
