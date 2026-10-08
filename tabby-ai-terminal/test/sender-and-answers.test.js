@@ -26,7 +26,7 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('buttons renamed', p.resetSessionButton.textContent === 'New session' && p.headerControls.contains(p.moreButton))
   ok('effort options plain', [...p.effortSelect.options].map(o => o.textContent).join(',') === 'auto,low,medium,high,xhigh,max')
   // sender target + collapse
-  ok('sender target label', p.senderTargetElement.textContent === '→ Console_ASUS1 - COM10')
+  ok('target tab named in the send button tooltips', p.senderLineButton.title === 'Send the first line to Console_ASUS1 - COM10' && p.senderAllButton.title.startsWith('Send every line to Console_ASUS1 - COM10') && !p.senderElement.querySelector('.ai-sender-title'), p.senderLineButton.title)
   ok('empty sender collapsed', host.classList.contains('ai-terminal-sender-collapsed'))
   ok('tag hint shown when no tags', !!p.savedCommandTabs.querySelector('.ai-saved-command-hint'))
   // analyze label + draft preserved
@@ -97,6 +97,11 @@ p.applyProviderStatus({ provider: 'claude', state: 'logged-in', label: 'ok' })
   ok('tag deleted', store.aiTerminal.savedSenderCommands.length === 0 && !document.querySelector('.ai-sender-tag-editor-overlay'))
   for (let i = 0; i < 15; i++) await p.saveSenderCommand('', `c${i}`, '', null)
   ok('more than 10 tags kept', p.getSavedSenderCommands().length === 15)
+  // no Clear button; typing dismisses a notice
+  ok('sender has no Clear button', ![...p.senderElement.querySelectorAll('button')].some(b => b.textContent === 'Clear'))
+  p.senderNotice = 'Stopped'; p.updateSenderState()
+  p.draft.value = 'x'; p.draft.dispatchEvent(new window.Event('input', { bubbles: true }))
+  ok('typing in the draft dismisses the notice', p.senderNotice === '' && !p.senderNextPreview.classList.contains('is-notice'))
   // collapse back
   p.draft.value = ''; p.draft.blur(); p.updateSenderState()
   ok('empty + blurred -> collapsed again', host.classList.contains('ai-terminal-sender-collapsed'))

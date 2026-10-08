@@ -19,7 +19,9 @@ h3.mb-3(translate) AI terminal
         min='1',
         step='1',
         [(ngModel)]='config.store.aiTerminal.maxSessionOutputLines',
+        [ngModelOptions]='{ updateOn: "blur" }',
         (ngModelChange)='fixSessionOutputLimit(); config.save()',
+        (keyup.enter)='$any($event.target).blur()',
     )
 
 .form-line
@@ -32,7 +34,9 @@ h3.mb-3(translate) AI terminal
         max='24',
         step='1',
         [(ngModel)]='config.store.aiTerminal.fontSize',
+        [ngModelOptions]='{ updateOn: "blur" }',
         (ngModelChange)='fixFontSize(); config.save()',
+        (keyup.enter)='$any($event.target).blur()',
     )
 
 .form-line
@@ -78,7 +82,9 @@ h3.mt-4.mb-3(translate) Provider CLIs
         min='1',
         step='1',
         [(ngModel)]='config.store.aiTerminal.cliUpdateIntervalHours',
+        [ngModelOptions]='{ updateOn: "blur" }',
         (ngModelChange)='fixCliUpdateInterval(); config.save()',
+        (keyup.enter)='$any($event.target).blur()',
     )
 
 .form-line(*ngFor='let provider of providers')

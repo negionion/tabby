@@ -116,15 +116,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 10px;
-    align-items: start;
-}
-.ai-sender-heading > .ai-panel-title {
-    flex: 0 0 auto;
-    min-height: 28px;
-    align-items: center;
 }
 /* Groups, then tags with + Save; the tag row wraps below the groups when the heading is too narrow */
 .ai-saved-command-toolbar {
@@ -487,21 +478,6 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-header-field .form-control {
     flex: 1 1 auto;
     min-width: 0;
-}
-.ai-sender-title {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    white-space: nowrap;
-    min-width: 0;
-}
-.ai-sender-target {
-    color: #a9bed1;
-    font-weight: 400;
-    font-size: 0.9em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 16em;
 }
 .ai-sender-next {
     flex: 1 1 auto;

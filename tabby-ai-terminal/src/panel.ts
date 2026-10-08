@@ -123,9 +123,9 @@ export class AITerminalPanel {
     private savedCommandTabs: HTMLElement
     private savedGroupBar: HTMLElement
     private draft: HTMLTextAreaElement
-    private senderTargetElement: HTMLElement|null = null
+    /** The tab name last written into the send button tooltips */
+    private senderTargetLabel = ''
     private senderNextPreview: HTMLElement
-    private senderClearButton: HTMLButtonElement
     private senderLineButton: HTMLButtonElement
     private senderAllButton: HTMLButtonElement
     private senderStopButton: HTMLButtonElement
@@ -455,7 +455,11 @@ export class AITerminalPanel {
             this.savedGroupBar.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
         }, { passive: false })
         this.draft = textarea('Type a command to stage it here - sent to the terminal one line at a time', 6)
-        this.draft.addEventListener('input', () => this.updateSenderState())
+        this.draft.addEventListener('input', () => {
+            // A "Stopped" notice is about the previous draft; editing dismisses it
+            this.senderNotice = ''
+            this.updateSenderState()
+        })
         this.draft.addEventListener('focus', () => this.updateSenderState())
         this.draft.addEventListener('blur', event => {
             // Clicking tags, groups or buttons of the sender keeps it open, so they do not move under the pointer
@@ -571,11 +575,6 @@ export class AITerminalPanel {
     private assembleSender (): void {
         this.senderNextPreview = document.createElement('span')
         this.senderNextPreview.className = 'ai-sender-next'
-        this.senderClearButton = button('Clear', 'secondary', () => {
-            this.draft.value = ''
-            this.senderNotice = ''
-            this.updateSenderState()
-        })
         this.senderLineButton = button('Send next', 'success', () => this.sendDraftLine())
         this.senderAllButton = button('Send all', 'success', () => this.sendDraftAll())
         this.senderStopButton = button('Stop', 'danger', () => {
@@ -585,7 +584,6 @@ export class AITerminalPanel {
         this.senderElement.append(
             this.senderSection(this.draft, [
                 this.senderNextPreview,
-                this.senderClearButton,
                 this.senderLineButton,
                 this.senderAllButton,
                 this.senderStopButton,
@@ -1026,7 +1024,7 @@ export class AITerminalPanel {
         }
         this.latestOutputPreview.classList.toggle('is-hint', this.latestOutputDetails.open)
         this.updateAnalyzeLabel()
-        if (this.senderTargetElement && this.senderTargetElement.textContent !== `→ ${this.getTargetLabel()}`) {
+        if (this.senderTargetLabel !== this.getTargetLabel()) {
             this.updateSenderState()
         }
         this.renderReferenceFolder()
@@ -1645,7 +1643,6 @@ export class AITerminalPanel {
         this.draft.readOnly = busy
         this.senderLineButton.disabled = busy || !lines.length
         this.senderAllButton.disabled = busy || !lines.length
-        this.senderClearButton.disabled = busy || !this.draft.value
         this.senderStopButton.hidden = !busy
         this.senderAllButton.textContent = busy ? `Sending ${this.senderProgress}` : lines.length > 1 ? `Send all (${lines.length})` : 'Send all'
         const preview = this.senderNotice || (lines.length ? `Next: ${lines[0]}` : '')
@@ -1654,10 +1651,12 @@ export class AITerminalPanel {
             this.senderNextPreview.title = preview
         }
         this.senderNextPreview.classList.toggle('is-notice', !!this.senderNotice)
-        const target = `→ ${this.getTargetLabel()}`
-        if (this.senderTargetElement && this.senderTargetElement.textContent !== target) {
-            this.senderTargetElement.textContent = target
-            this.senderTargetElement.title = `Commands are sent to ${this.getTargetLabel()}`
+        // The target tab is named in the send button tooltips (and in the confirmation for risky commands)
+        const target = this.getTargetLabel()
+        if (this.senderTargetLabel !== target) {
+            this.senderTargetLabel = target
+            this.senderLineButton.title = `Send the first line to ${target}`
+            this.senderAllButton.title = `Send every line to ${target}, waiting for the prompt between lines`
         }
         // An empty sender shrinks to one input line unless disabled in the config
         const collapsed = this.config.store.aiTerminal.senderAutoCollapse !== false
@@ -2570,14 +2569,7 @@ export class AITerminalPanel {
         const heading = document.createElement('div')
         heading.className = 'ai-sender-heading'
 
-        const titleElement = document.createElement('div')
-        titleElement.className = 'ai-panel-title ai-sender-title'
-        titleElement.textContent = 'Sender'
-        this.senderTargetElement = document.createElement('span')
-        this.senderTargetElement.className = 'ai-sender-target'
-        titleElement.appendChild(this.senderTargetElement)
-
-        heading.append(titleElement, this.createSavedCommandToolbar())
+        heading.append(this.createSavedCommandToolbar())
         section.append(heading, body)
 
         if (buttons.length) {
