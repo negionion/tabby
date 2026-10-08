@@ -27,7 +27,6 @@ import {
     matchesGroupFilter,
     normalizeGroupName,
     normalizeSavedCommands,
-    resolveGroupFilter,
     withGroupColor,
 } from './senderTags'
 
@@ -120,7 +119,10 @@ export class AITerminalPanel {
     private runningLabel: HTMLElement|null = null
     private runningTimer: ReturnType<typeof setInterval>|null = null
     private pendingPermissions: PendingPermission[] = []
-    private savedCommandTabs: HTMLElement
+    /** Tags of one group chip, in a panel that opens upwards from the chip */
+    private tagMenu: HTMLElement|null = null
+    /** Which chip the open tag menu belongs to: '' (all tags), a group name or UNGROUPED_FILTER */
+    private tagMenuFilter: string|null = null
     private savedGroupBar: HTMLElement
     private draft: HTMLTextAreaElement
     /** The tab name last written into the send button tooltips */
@@ -434,19 +436,8 @@ export class AITerminalPanel {
 
     /** Sender tag and group bars, the draft and the listeners that keep the sender open or collapse it */
     private buildSenderInput (): void {
-        this.savedCommandTabs = document.createElement('div')
-        this.savedCommandTabs.className = 'ai-saved-command-tabs'
-        this.savedCommandTabs.addEventListener('wheel', event => {
-            if (this.savedCommandTabs.scrollWidth <= this.savedCommandTabs.clientWidth) {
-                return
-            }
-            event.preventDefault()
-            const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
-            this.savedCommandTabs.scrollLeft += delta
-        }, { passive: false })
         this.savedGroupBar = document.createElement('div')
         this.savedGroupBar.className = 'ai-saved-group-bar'
-        this.savedGroupBar.hidden = true
         this.savedGroupBar.addEventListener('wheel', event => {
             if (this.savedGroupBar.scrollWidth <= this.savedGroupBar.clientWidth) {
                 return
@@ -464,7 +455,7 @@ export class AITerminalPanel {
         this.draft.addEventListener('blur', event => {
             // Clicking tags, groups or buttons of the sender keeps it open, so they do not move under the pointer
             const related = event.relatedTarget
-            if (this.senderPointerDown || related instanceof Node && this.senderElement.contains(related)) {
+            if (this.senderPointerDown || related instanceof Node && (this.senderElement.contains(related) || this.tagMenu?.contains(related))) {
                 this.senderForceOpen = true
                 return
             }
@@ -608,6 +599,7 @@ export class AITerminalPanel {
         this.senderStopRequested = true
         this.cancelAnalyze()
         this.closeSenderTagEditor()
+        this.closeTagMenu()
         this.closeAnswerViewer()
         if (this.outputRenderTimer) {
             clearTimeout(this.outputRenderTimer)
@@ -1125,11 +1117,15 @@ export class AITerminalPanel {
 
     /** Collapses a sender that was kept open for tag or group clicks once the user clicks elsewhere */
     private collapseSenderOnOutsideClick = (event: MouseEvent): void => {
+        const target = event.target
+        // The tag menu closes on a click anywhere but in the menu or on a group chip (which toggles it)
+        if (this.tagMenu && !(target instanceof Element && (this.tagMenu.contains(target) || target.closest('.ai-saved-group-chip')))) {
+            this.closeTagMenu()
+        }
         if (!this.senderForceOpen || document.activeElement === this.draft) {
             return
         }
-        const target = event.target
-        if (target instanceof Element && (this.senderElement.contains(target) || target.closest('.ai-sender-tag-editor-overlay'))) {
+        if (target instanceof Element && (this.senderElement.contains(target) || target.closest('.ai-sender-tag-editor-overlay, .ai-tag-menu'))) {
             return
         }
         this.senderForceOpen = false
@@ -1917,17 +1913,12 @@ export class AITerminalPanel {
     private createSavedCommandToolbar (): HTMLElement {
         const toolbar = document.createElement('div')
         toolbar.className = 'ai-saved-command-toolbar'
-        toolbar.classList.toggle('has-groups', !this.savedGroupBar.hidden)
-
-        const row = document.createElement('div')
-        row.className = 'ai-saved-command-row'
 
         const addButton = button('+ Save', 'secondary', () => this.openSenderTagEditor())
         addButton.classList.add('ai-saved-command-control', 'is-add')
         addButton.title = 'Save the Sender content as a tag. Use {{name}} for values to fill in when inserting.'
 
-        row.append(this.savedCommandTabs, addButton)
-        toolbar.append(this.savedGroupBar, row)
+        toolbar.append(this.savedGroupBar, addButton)
         return toolbar
     }
 
@@ -2030,14 +2021,10 @@ export class AITerminalPanel {
             savedCommands.splice(insertAt, 0, item)
             this.selectedSavedCommandIndex = insertAt
         }
-        // Show the group the tag was saved to when the current filter would hide it
-        if (!matchesGroupFilter(item, this.getGroupFilter(savedCommands))) {
-            this.config.store.aiTerminal.senderGroupFilter = groupName ?? ''
-        }
         await this.setSavedSenderCommands(savedCommands)
     }
 
-    private openSenderTagEditor (editIndex: number|null = null): void {
+    private openSenderTagEditor (editIndex: number|null = null, presetGroup = ''): void {
 
         const savedCommand = editIndex === null ? null : this.getSavedSenderCommands()[editIndex]
         if (editIndex !== null && !savedCommand) {
@@ -2065,7 +2052,7 @@ export class AITerminalPanel {
         groupInput.type = 'text'
         groupInput.className = 'form-control'
         groupInput.placeholder = 'Leave blank to keep the tag ungrouped'
-        groupInput.value = savedCommand ? savedCommand.group ?? '' : this.getActiveGroup() ?? ''
+        groupInput.value = savedCommand ? savedCommand.group ?? '' : presetGroup
         const groupOptions = document.createElement('datalist')
         groupOptions.id = `ai-sender-tag-groups-${++tagGroupListSeq}`
         for (const group of getSavedGroups(this.getSavedSenderCommands())) {
@@ -2145,74 +2132,21 @@ export class AITerminalPanel {
         return normalizeSavedCommands(this.config.store.aiTerminal.savedSenderCommands)
     }
 
-    /** Current group filter: '' for all tags, a group name, or UNGROUPED_FILTER */
-    private getGroupFilter (commands: SavedSenderCommand[]): string {
-        return resolveGroupFilter(this.config.store.aiTerminal.senderGroupFilter, commands)
-    }
-
-    private getActiveGroup (): string|undefined {
-        const filter = this.getGroupFilter(this.getSavedSenderCommands())
-        return filter && filter !== UNGROUPED_FILTER ? filter : undefined
-    }
-
-    private setGroupFilter (filter: string): void {
-        this.config.store.aiTerminal.senderGroupFilter = filter
-        this.savedCommandTabs.scrollLeft = 0
-        this.renderSavedCommandTabs()
-        void this.config.save()
-    }
-
     private renderSavedCommandTabs (): void {
         this.automaticGroupColors = null
-        const savedCommands = this.getSavedSenderCommands()
-        const filter = this.getGroupFilter(savedCommands)
-        this.renderSavedGroupBar(savedCommands, filter)
-        const previousScrollLeft = this.savedCommandTabs.scrollLeft
-        this.savedCommandTabs.replaceChildren()
-        savedCommands.forEach((item, index) => {
-            if (!matchesGroupFilter(item, filter)) {
-                return
-            }
-            const tab = document.createElement('button')
-            tab.type = 'button'
-            tab.className = 'ai-saved-command-tab'
-            tab.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
-            if (item.group) {
-                tab.classList.add('has-group')
-                applyGroupColor(tab, this.getGroupColor(item.group))
-            }
-            tab.textContent = buildSavedCommandLabel(item.name ?? item.command)
-            tab.title = [
-                item.name,
-                item.command,
-                item.group ? `Group: ${item.group}` : '',
-                'Right-click to edit, drag to move',
-            ].filter(Boolean).join('\n\n')
-            tab.addEventListener('click', () => this.insertSavedCommandIntoDraft(item.command, index))
-            tab.addEventListener('contextmenu', event => {
-                event.preventDefault()
-                this.selectedSavedCommandIndex = index
-                this.renderSavedCommandTabs()
-                this.openSenderTagEditor(index)
-            })
-            this.installTagDrag(tab, index)
-            this.savedCommandTabs.appendChild(tab)
-        })
-        if (!savedCommands.length) {
+        this.renderSavedGroupBar(this.getSavedSenderCommands())
+        if (this.tagMenuFilter !== null) {
+            this.renderTagMenu()
+        }
+    }
+
+    private renderSavedGroupBar (commands: SavedSenderCommand[]): void {
+        this.savedGroupBar.replaceChildren()
+        if (!commands.length) {
             const hint = document.createElement('span')
             hint.className = 'ai-saved-command-hint'
             hint.textContent = 'No saved tags yet - type a command and press + Save'
-            this.savedCommandTabs.appendChild(hint)
-        }
-        this.savedCommandTabs.scrollLeft = previousScrollLeft
-    }
-
-    private renderSavedGroupBar (commands: SavedSenderCommand[], filter: string): void {
-        const groups = getSavedGroups(commands)
-        this.savedGroupBar.replaceChildren()
-        this.savedGroupBar.hidden = !groups.length
-        this.savedGroupBar.parentElement?.classList.toggle('has-groups', groups.length > 0)
-        if (!groups.length) {
+            this.savedGroupBar.appendChild(hint)
             return
         }
 
@@ -2220,25 +2154,33 @@ export class AITerminalPanel {
             const element = document.createElement('button')
             element.type = 'button'
             element.className = 'ai-saved-group-chip'
-            element.classList.toggle('is-active', value === filter)
+            element.dataset.filter = value
+            element.classList.toggle('is-active', value === this.tagMenuFilter)
             const text = document.createElement('span')
             text.className = 'ai-saved-group-name'
             text.textContent = label
             const badge = document.createElement('span')
             badge.className = 'ai-saved-group-count'
             badge.textContent = String(count)
-            element.append(text, badge)
+            const arrow = document.createElement('span')
+            arrow.className = 'ai-saved-group-arrow'
+            arrow.textContent = '▴'
+            element.append(text, badge, arrow)
             const color = value === '' ? ALL_GROUPS_COLOR : value === UNGROUPED_FILTER ? GROUP_COLORS.gray.hex : this.getGroupColor(value)
             applyGroupColor(element, color)
-            element.addEventListener('click', () => this.setGroupFilter(value))
+            element.addEventListener('click', () => this.toggleTagMenu(value))
             this.savedGroupBar.appendChild(element)
             return element
         }
 
-        chip('All', '', commands.length).title = 'Show all tags'
+        const groups = getSavedGroups(commands)
+        chip(groups.length ? 'All' : 'Tags', '', commands.length).title = 'Show the saved tags'
+        if (!groups.length) {
+            return
+        }
         for (const group of groups) {
             const element = chip(group, group, commands.filter(item => item.group === group).length)
-            element.title = `${group}\n\nRight-click for group actions, drag to reorder`
+            element.title = `${group}\n\nClick to show its tags, right-click for group actions, drag to reorder`
             element.addEventListener('contextmenu', event => {
                 event.preventDefault()
                 this.openGroupMenu(group, event)
@@ -2256,6 +2198,175 @@ export class AITerminalPanel {
             this.openGroupMenu(null, event)
         })
         this.installGroupChipDrop(ungrouped, null)
+    }
+
+    private toggleTagMenu (filter: string): void {
+        if (this.tagMenuFilter === filter) {
+            this.closeTagMenu()
+            return
+        }
+        this.tagMenuFilter = filter
+        this.renderSavedCommandTabs()
+    }
+
+    private closeTagMenu (): void {
+        this.tagMenu?.remove()
+        this.tagMenu = null
+        if (this.tagMenuFilter !== null) {
+            this.tagMenuFilter = null
+            this.renderSavedGroupBar(this.getSavedSenderCommands())
+        }
+    }
+
+    /** Lists the tags of the open chip above it; the sender sits at the bottom, so the list opens upwards */
+    private renderTagMenu (): void {
+        const filter = this.tagMenuFilter
+        const anchor = Array.from(this.savedGroupBar.querySelectorAll<HTMLElement>('.ai-saved-group-chip')).find(element => element.dataset.filter === filter)
+        if (filter === null || !anchor) {
+            this.closeTagMenu()
+            return
+        }
+        if (!this.tagMenu) {
+            this.tagMenu = this.createTagMenuElement()
+        }
+
+        const list = document.createElement('div')
+        list.className = 'ai-tag-menu-list'
+        this.getSavedSenderCommands().forEach((item, index) => {
+            if (matchesGroupFilter(item, filter)) {
+                list.appendChild(this.createTagMenuItem(item, index))
+            }
+        })
+        if (!list.childElementCount) {
+            const empty = document.createElement('div')
+            empty.className = 'ai-tag-menu-empty'
+            empty.textContent = 'No tags here yet'
+            list.appendChild(empty)
+        }
+        const saveHere = button('+ Save current here', 'secondary', () => {
+            this.closeTagMenu()
+            this.openSenderTagEditor(null, filter && filter !== UNGROUPED_FILTER ? filter : '')
+        })
+        saveHere.classList.add('ai-tag-menu-save')
+        saveHere.title = 'Save the Sender content as a tag in this group'
+        this.tagMenu.replaceChildren(list, saveHere)
+        this.positionTagMenu(anchor)
+    }
+
+    private createTagMenuElement (): HTMLElement {
+        const menu = document.createElement('div')
+        menu.className = 'ai-tag-menu'
+        menu.setAttribute('role', 'menu')
+        guardTerminalEvents(menu)
+        // Clicks in the menu count as clicks in the sender, so it does not collapse under the pointer
+        menu.addEventListener('mousedown', () => {
+            this.senderPointerDown = true
+            setTimeout(() => {
+                this.senderPointerDown = false
+            })
+        }, true)
+        menu.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                this.closeTagMenu()
+            }
+        })
+        menu.style.setProperty('--ai-terminal-font-size', `${this.getFontSize()}px`)
+        document.body.appendChild(menu)
+        return menu
+    }
+
+    private createTagMenuItem (item: SavedSenderCommand, index: number): HTMLElement {
+        const row = document.createElement('button')
+        row.type = 'button'
+        row.className = 'ai-tag-menu-item'
+        row.setAttribute('role', 'menuitem')
+        row.classList.toggle('is-active', index === this.selectedSavedCommandIndex)
+        if (item.group) {
+            row.classList.add('has-group')
+            applyGroupColor(row, this.getGroupColor(item.group))
+        }
+        const name = document.createElement('span')
+        name.className = 'ai-tag-menu-name'
+        name.textContent = item.name ?? buildSavedCommandLabel(item.command)
+        const command = document.createElement('span')
+        command.className = 'ai-tag-menu-command'
+        command.textContent = item.command.split(/\r?\n/)[0]
+        row.append(name, command)
+        row.title = [
+            item.name,
+            item.command,
+            item.group ? `Group: ${item.group}` : '',
+            'Click to insert, right-click to edit or move, drag to reorder',
+        ].filter(Boolean).join('\n\n')
+        row.addEventListener('click', () => {
+            this.closeTagMenu()
+            this.insertSavedCommandIntoDraft(item.command, index)
+        })
+        row.addEventListener('contextmenu', event => {
+            event.preventDefault()
+            this.openTagActions(index, event)
+        })
+        this.installTagDrag(row, index, 'y')
+        return row
+    }
+
+    private positionTagMenu (anchor: HTMLElement): void {
+        if (!this.tagMenu) {
+            return
+        }
+        const rect = anchor.getBoundingClientRect()
+        this.tagMenu.style.bottom = `${window.innerHeight - rect.top + 6}px`
+        this.tagMenu.style.maxHeight = `${Math.max(120, rect.top - 16)}px`
+        this.tagMenu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - this.tagMenu.offsetWidth - 8))}px`
+    }
+
+    /** Right-click on a tag in the menu */
+    private openTagActions (index: number, event: MouseEvent): void {
+        const commands = this.getSavedSenderCommands()
+        const item = commands[index] as SavedSenderCommand|undefined
+        if (!item) {
+            return
+        }
+        const moveTargets: MenuItemOptions[] = getSavedGroups(commands).map(group => ({
+            label: group,
+            enabled: item.group !== group,
+            click: () => void this.moveTagToGroup(index, group),
+        }))
+        moveTargets.push(
+            { type: 'separator' },
+            { label: 'Ungrouped', enabled: !!item.group, click: () => void this.moveTagToGroup(index, undefined) },
+            {
+                label: 'New group...',
+                click: () => this.openFormDialog('Move to a new group', [{ label: 'Group name', value: '' }], 'Move', ([value]) => {
+                    const name = normalizeGroupName(value)
+                    if (!name) {
+                        return false
+                    }
+                    void this.moveTagToGroup(index, name)
+                    return true
+                }),
+            },
+        )
+        this.platform.popupContextMenu([
+            {
+                label: 'Edit...',
+                click: () => {
+                    this.closeTagMenu()
+                    this.selectedSavedCommandIndex = index
+                    this.openSenderTagEditor(index)
+                },
+            },
+            { label: 'Move to group', submenu: moveTargets },
+            { type: 'separator' },
+            {
+                label: 'Delete',
+                click: () => {
+                    this.selectedSavedCommandIndex = index
+                    void this.removeSelectedSenderCommand()
+                },
+            },
+        ], event)
     }
 
     private openGroupMenu (group: string|null, event: MouseEvent): void {
@@ -2355,8 +2466,8 @@ export class AITerminalPanel {
                 item.group = to
             }
         }
-        if (this.config.store.aiTerminal.senderGroupFilter === from) {
-            this.config.store.aiTerminal.senderGroupFilter = to
+        if (this.tagMenuFilter === from) {
+            this.tagMenuFilter = to
         }
         // The color moves with the name; when merging into an existing group, that group keeps its color
         const fromColor = this.getChosenGroupColor(from)
@@ -2392,7 +2503,7 @@ export class AITerminalPanel {
         await this.setSavedSenderCommands(commands)
     }
 
-    private installTagDrag (tab: HTMLElement, index: number): void {
+    private installTagDrag (tab: HTMLElement, index: number, axis: 'x'|'y' = 'x'): void {
         tab.draggable = true
         tab.addEventListener('dragstart', event => {
             event.stopPropagation()
@@ -2415,7 +2526,7 @@ export class AITerminalPanel {
             if (event.dataTransfer) {
                 event.dataTransfer.dropEffect = 'move'
             }
-            const before = this.isBeforeMidpoint(tab, event)
+            const before = this.isBeforeMidpoint(tab, event, axis)
             tab.classList.toggle('is-drop-before', before)
             tab.classList.toggle('is-drop-after', !before)
         })
@@ -2427,7 +2538,7 @@ export class AITerminalPanel {
             event.preventDefault()
             event.stopPropagation()
             const from = this.dragTagIndex
-            const before = this.isBeforeMidpoint(tab, event)
+            const before = this.isBeforeMidpoint(tab, event, axis)
             this.endSavedDrag()
             if (from !== index) {
                 void this.moveTag(from, index, before)
@@ -2494,16 +2605,19 @@ export class AITerminalPanel {
         this.dragTagIndex = null
         this.dragGroup = null
         this.savedGroupBar.classList.remove('is-dragging-tag')
-        for (const container of [this.savedGroupBar, this.savedCommandTabs]) {
+        for (const container of [this.savedGroupBar, this.tagMenu]) {
+            if (!container) {
+                continue
+            }
             for (const element of Array.from(container.querySelectorAll('.is-dragging, .is-drop-before, .is-drop-after, .is-drop-target'))) {
                 element.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after', 'is-drop-target')
             }
         }
     }
 
-    private isBeforeMidpoint (element: HTMLElement, event: MouseEvent): boolean {
+    private isBeforeMidpoint (element: HTMLElement, event: MouseEvent, axis: 'x'|'y' = 'x'): boolean {
         const rect = element.getBoundingClientRect()
-        return event.clientX < rect.left + rect.width / 2
+        return axis === 'x' ? event.clientX < rect.left + rect.width / 2 : event.clientY < rect.top + rect.height / 2
     }
 
     /** Moves a tag next to another tag; it joins the group of that tag */

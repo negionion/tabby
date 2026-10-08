@@ -9,7 +9,7 @@ const ok = (name, cond, extra = '') => { if (!cond) failed++; console.log(`${con
 const host = document.getElementById('tab')
 const tab = { element: { nativeElement: host }, title: 'COM10', customTitle: null, sendInput () {}, frontend: { focus () {} }, configure () {} }
 const sub = { subscribe: () => ({ unsubscribe () {} }) }
-const store = { aiTerminal: { maxSessionOutputLines: 1000, senderGroupFilter: '', senderGroupColors: {}, savedSenderCommands: [
+const store = { aiTerminal: { maxSessionOutputLines: 1000, senderGroupColors: {}, savedSenderCommands: [
   { name: 'a1', command: 'a1', group: 'EAP5000' }, { name: 'b1', command: 'b1', group: 'Wi-Fi' }, { name: 'u1', command: 'u1' }, { name: 'a2', command: 'a2', group: 'EAP5000' },
 ] } }
 const auth = { statusChanged$: sub, cliUpdated$: sub, isCliUpdating: () => false, getCliUpdateStatus: () => undefined, getKnownCliVersion: () => undefined, getSelectedProvider: () => 'claude', getSelectedModel: () => 'opus', getAvailableModels: async () => ['auto'], getClaudeModelStatus: () => undefined, publishStatus () {} }
@@ -18,7 +18,11 @@ const platform = { showMessageBox: async () => ({ response: 0 }), setClipboard (
 const p = new AITerminalPanel(tab, auth, { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ mode: 'plan' }) }, { store, save: async () => {}, changed$: sub }, platform)
 host.append(p.element, p.senderElement)
 const chip = name => [...p.savedGroupBar.querySelectorAll('.ai-saved-group-chip')].find(c => c.querySelector('.ai-saved-group-name').textContent === name)
-const tagEl = name => [...p.savedCommandTabs.querySelectorAll('.ai-saved-command-tab')].find(t => t.textContent === name)
+// Tags are listed in the menu of the All chip
+const tagEl = name => {
+  if (p.tagMenuFilter !== '') { p.closeTagMenu(); chip('All').click() }
+  return [...document.querySelectorAll('.ai-tag-menu-item')].find(r => r.querySelector('.ai-tag-menu-name').textContent === name)
+}
 const color = el => el.style.getPropertyValue('--ai-group-color')
 ;(async () => {
   p.renderSavedCommandTabs()
