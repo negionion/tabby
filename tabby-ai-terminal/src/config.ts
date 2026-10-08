@@ -28,6 +28,7 @@ export class AITerminalConfigProvider extends ConfigProvider {
             senderCommandInsertMode: 'replace',
             savedSenderCommands: [],
             senderVariables: {},
+            senderGroupFilter: '',
             senderGroupColors: {},
             senderAutoCollapse: true,
             dangerousCommandPatterns: null,

@@ -65,6 +65,14 @@ export function getSavedGroups (commands: SavedSenderCommand[]): string[] {
     return [...new Set(commands.map(item => item.group).filter((group): group is string => Boolean(group)))]
 }
 
+/** The stored group filter if it still matches tags: '' for all tags, a group name, or UNGROUPED_FILTER */
+export function resolveGroupFilter (filter: unknown, commands: SavedSenderCommand[]): string {
+    if (filter === UNGROUPED_FILTER) {
+        return commands.some(item => item.group) && commands.some(item => !item.group) ? filter : ''
+    }
+    return typeof filter === 'string' && commands.some(item => item.group === filter) ? filter : ''
+}
+
 export function matchesGroupFilter (item: SavedSenderCommand, filter: string): boolean {
     if (!filter) {
         return true

@@ -17,12 +17,12 @@ let menu = null
 const platform = { showMessageBox: async () => ({ response: 0 }), setClipboard () {}, popupContextMenu: items => { menu = items } }
 const p = new AITerminalPanel(tab, auth, { run () { return { cancel () {} } }, getClaudeRunSettings: () => ({ requested: 'plan', mode: 'plan' }) }, { store, save: async () => {}, changed$: sub }, platform)
 host.append(p.element, p.senderElement)
-const chip = name => [...p.savedGroupBar.querySelectorAll('.ai-saved-group-chip')].find(c => c.querySelector('.ai-saved-group-name').textContent === name)
-// Tags are listed in the menu of the All chip
-const tagEl = name => {
-  if (p.tagMenuFilter !== '') { p.closeTagMenu(); chip('All').click() }
-  return [...document.querySelectorAll('.ai-tag-menu-item')].find(r => r.querySelector('.ai-tag-menu-name').textContent === name)
+// Groups are rows of the list that the group selector opens; tags are the row of the sender (All shown)
+const chip = name => {
+  if (!p.groupMenu) p.savedGroupBar.querySelector('.ai-group-selector').click()
+  return [...document.querySelectorAll('.ai-group-menu-item')].find(r => !r.classList.contains('is-empty') && r.querySelector('.ai-group-menu-name').textContent === name)
 }
+const tagEl = name => [...p.savedCommandTabs.querySelectorAll('.ai-saved-command-tab')].find(t => t.textContent === name)
 const color = el => el.style.getPropertyValue('--ai-group-color')
 ;(async () => {
   p.renderSavedCommandTabs()

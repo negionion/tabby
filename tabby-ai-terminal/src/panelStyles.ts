@@ -117,16 +117,28 @@ export const AI_TERMINAL_PANEL_STYLES = `
     max-width: 100%;
     min-width: 0;
 }
-/* Group chips (each opens its tags in a menu above it), then + Save on the right */
+/* Group selector, then the tags of the shown group, then + Save */
 .ai-saved-command-toolbar {
     width: 100%;
     max-width: 100%;
     min-width: 0;
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
     overflow: hidden;
 }
+.ai-saved-command-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    justify-content: flex-start;
+    overscroll-behavior-x: contain;
+}
+.ai-saved-command-tab,
 .ai-saved-command-control {
     flex: 0 0 auto;
     min-width: 0;
@@ -143,6 +155,18 @@ export const AI_TERMINAL_PANEL_STYLES = `
     justify-content: center;
     text-align: center;
 }
+.ai-saved-command-tab {
+    max-width: 20em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* A tag shows its group color as a bar on the left, also in the All view */
+.ai-saved-command-tab.has-group,
+.ai-saved-command-tab.has-group.is-active {
+    border-left: 3px solid var(--ai-group-accent);
+}
+.ai-saved-command-tab:hover,
 .ai-saved-command-control:hover {
     background: rgba(143, 211, 255, 0.16);
     border-color: rgba(143, 211, 255, 0.36);
@@ -151,8 +175,12 @@ export const AI_TERMINAL_PANEL_STYLES = `
 .ai-saved-command-control.is-add:hover {
     background: transparent;
 }
+.ai-saved-command-tab.is-active {
+    color: #0b141d;
+    background: #8fd3ff;
+    border-color: #8fd3ff;
+}
 .ai-saved-command-control {
-    margin-left: auto;
     padding: 0 10px;
     font-weight: 700;
     background: transparent;
@@ -457,20 +485,16 @@ export const AI_TERMINAL_PANEL_STYLES = `
     white-space: nowrap;
 }
 .ai-saved-group-bar {
-    flex: 1 1 auto;
-    max-width: 100%;
+    flex: 0 0 auto;
+    max-width: 40%;
     min-width: 0;
     min-height: 28px;
     display: flex;
-    gap: 4px;
     align-items: center;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: thin;
-    overscroll-behavior-x: contain;
 }
 .ai-saved-group-chip {
-    flex: 0 0 auto;
+    max-width: 100%;
+    min-width: 0;
     height: 24px;
     padding: 0 9px;
     border-radius: 12px;
@@ -493,44 +517,47 @@ export const AI_TERMINAL_PANEL_STYLES = `
     border-color: var(--ai-group-color, #ffc75e);
 }
 .ai-saved-group-arrow {
+    flex: 0 0 auto;
     font-size: 0.8em;
     opacity: 0.75;
+}
+.ai-saved-group-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .ai-saved-group-chip.is-ungrouped .ai-saved-group-name {
     font-style: italic;
 }
-.ai-saved-group-chip.is-empty {
+.ai-saved-group-bar[hidden] {
     display: none;
 }
-.ai-saved-group-bar.is-dragging-tag .ai-saved-group-chip.is-empty {
-    display: inline-flex;
+.ai-group-menu.is-dragging-tag .ai-group-menu-item.is-empty {
+    display: flex;
 }
 .ai-saved-group-count {
+    flex: 0 0 auto;
     font-size: 0.82em;
     opacity: 0.7;
 }
-.ai-saved-group-chip.is-drop-target {
-    box-shadow: 0 0 0 2px #8fd3ff;
-}
-.ai-tag-menu-item.is-dragging,
-.ai-saved-group-chip.is-dragging {
+.ai-saved-command-tab.is-dragging,
+.ai-group-menu-item.is-dragging {
     opacity: 0.45;
 }
-.ai-saved-group-chip.is-drop-before {
+.ai-saved-command-tab.is-drop-before {
     box-shadow: inset 3px 0 0 #8fd3ff;
 }
-.ai-saved-group-chip.is-drop-after {
+.ai-saved-command-tab.is-drop-after {
     box-shadow: inset -3px 0 0 #8fd3ff;
 }
-/* Tags of a group chip: a panel on document.body that opens upwards from the chip */
-.ai-tag-menu {
+/* Group list: a panel on document.body that opens upwards from the group selector */
+.ai-group-menu {
     position: fixed;
     z-index: 1500;
-    min-width: 220px;
-    max-width: min(460px, calc(100vw - 16px));
+    min-width: 200px;
+    max-width: min(360px, calc(100vw - 16px));
     display: flex;
     flex-direction: column;
-    gap: 4px;
     padding: 6px;
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.14);
@@ -539,7 +566,7 @@ export const AI_TERMINAL_PANEL_STYLES = `
     font-size: var(--ai-terminal-font-size, 12px);
     color: #d7e7f5;
 }
-.ai-tag-menu-list {
+.ai-group-menu-list {
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -547,59 +574,56 @@ export const AI_TERMINAL_PANEL_STYLES = `
     overflow-y: auto;
     scrollbar-width: thin;
 }
-.ai-tag-menu-item {
+.ai-group-menu-item {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 10px;
     width: 100%;
     padding: 5px 8px;
     border: 0;
-    border-left: 3px solid transparent;
+    border-left: 3px solid var(--ai-group-accent, transparent);
     border-radius: 5px;
     background: transparent;
     color: inherit;
     font-size: inherit;
     text-align: left;
 }
-.ai-tag-menu-item.has-group {
-    border-left-color: var(--ai-group-accent);
-}
-.ai-tag-menu-item:hover {
+.ai-group-menu-item:hover {
     background: rgba(143, 211, 255, 0.14);
 }
-.ai-tag-menu-item.is-active .ai-tag-menu-name {
-    color: #8fd3ff;
+.ai-group-menu-item.is-active {
+    background: var(--ai-group-tint);
 }
-.ai-tag-menu-name {
-    flex: 0 0 auto;
-    max-width: 16em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.ai-group-menu-item.is-active .ai-group-menu-name {
+    color: var(--ai-group-accent);
+    font-weight: 700;
 }
-.ai-tag-menu-command {
-    flex: 1 1 auto;
-    min-width: 0;
-    color: #7f97ad;
-    font-family: monospace;
-    font-size: 0.92em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.ai-tag-menu-item.is-drop-before {
-    box-shadow: inset 0 2px 0 #8fd3ff;
-}
-.ai-tag-menu-item.is-drop-after {
-    box-shadow: inset 0 -2px 0 #8fd3ff;
-}
-.ai-tag-menu-empty {
-    padding: 6px 8px;
-    color: #6f8396;
+.ai-group-menu-item.is-ungrouped .ai-group-menu-name {
     font-style: italic;
 }
-.ai-tag-menu-save {
-    align-self: stretch;
+.ai-group-menu-item.is-empty {
+    display: none;
+}
+.ai-group-menu-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ai-group-menu-count {
+    flex: 0 0 auto;
+    color: #7f97ad;
+    font-size: 0.85em;
+}
+.ai-group-menu-item.is-drop-target {
+    box-shadow: inset 0 0 0 2px #8fd3ff;
+}
+.ai-group-menu-item.is-drop-before {
+    box-shadow: inset 0 2px 0 #8fd3ff;
+}
+.ai-group-menu-item.is-drop-after {
+    box-shadow: inset 0 -2px 0 #8fd3ff;
 }
 .ai-color-current {
     margin: -4px 0 10px;
